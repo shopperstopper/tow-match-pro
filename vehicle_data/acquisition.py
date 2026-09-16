@@ -46,13 +46,27 @@ def acquire_vehicle(inp: VehicleAcquisitionInput, vpic_client=None, manufacturer
     out=VehicleAcquisitionResult()
     vin=normalize_vin(inp.vin)
     decoded = {}
+    known = None
     if vin:
         if vin_is_valid(vin):
             out.identity.vin=vin
+            from .known_vehicles import get_known_vehicle
+            known=get_known_vehicle(vin)
+            if known:
+                ident=known.get('identity',{})
+                out.identity=VehicleIdentity(vin=vin, **ident)
             if vpic_client is not None:
                 try:
                     decoded=vpic_client.decode(vin)
-                    out.identity=_identity_from_vpic(vin, decoded)
+                    decoded_identity=_identity_from_vpic(vin, decoded)
+                    # vPIC is preferred for identity when it supplies a field; verified cache fills gaps.
+                    if known:
+                        base=known.get('identity',{})
+                        for field_name in VehicleIdentity.__dataclass_fields__:
+                            if field_name == 'vin': continue
+                            if getattr(decoded_identity,field_name) is None and field_name in base:
+                                setattr(decoded_identity,field_name,base[field_name])
+                    out.identity=decoded_identity
                     if decoded.get('ErrorCode') not in (None,'','0'):
                         out.warnings.append('VIN decoder returned a warning; review vehicle identity.')
                 except Exception:
@@ -95,9 +109,14 @@ def acquire_vehicle(inp: VehicleAcquisitionInput, vpic_client=None, manufacturer
             make=(out.identity.make or '').strip().upper()
             if make in {'FORD','FORD MOTOR COMPANY'}:
                 from .manufacturers.ford import FordVehicleConfig
-                cfg=FordVehicleConfig(axle_code=inp.axle_code, axle_ratio=inp.axle_ratio, drive=inp.drive,
-                    wheelbase_variant=inp.wheelbase_variant, heavy_duty_trailer_tow=inp.heavy_duty_trailer_tow,
-                    fifth_wheel_gooseneck_prep=inp.fifth_wheel_gooseneck_prep)
+                kcfg=(known or {}).get('ford_config',{})
+                cfg=FordVehicleConfig(
+                    axle_code=inp.axle_code if inp.axle_code is not None else kcfg.get('axle_code'),
+                    axle_ratio=inp.axle_ratio if inp.axle_ratio is not None else kcfg.get('axle_ratio'),
+                    drive=inp.drive if inp.drive is not None else kcfg.get('drive'),
+                    wheelbase_variant=inp.wheelbase_variant if inp.wheelbase_variant is not None else kcfg.get('wheelbase_variant'),
+                    heavy_duty_trailer_tow=inp.heavy_duty_trailer_tow if inp.heavy_duty_trailer_tow is not None else kcfg.get('heavy_duty_trailer_tow'),
+                    fifth_wheel_gooseneck_prep=inp.fifth_wheel_gooseneck_prep if inp.fifth_wheel_gooseneck_prep is not None else kcfg.get('fifth_wheel_gooseneck_prep'))
                 if decoded:
                     from .configuration import ford_config_from_vpic, merge_ford_config
                     cfg=merge_ford_config(cfg, ford_config_from_vpic(out.identity, decoded))
