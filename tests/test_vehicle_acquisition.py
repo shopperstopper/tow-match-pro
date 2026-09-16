@@ -94,3 +94,15 @@ def test_explicit_configuration_overrides_vpic_clue():
     assert merged.drive == '4x4'
     assert merged.engine == '5.0L V8'
     assert merged.cab == 'REGULAR'
+
+def test_verified_pilot_expedition_vin_resolves_ford_rating_without_manual_tow_entry():
+    from vehicle_data.manufacturer_service import ManufacturerCapabilityService
+    inp=VehicleAcquisitionInput(vin='1FMJU2AT7KEA31907',payload_label_lb=1501,
+        occupant_weight_lb=400,truck_cargo_lb=150,hitch_hardware_lb=100)
+    # Even if live vPIC is unavailable, verified vehicle config cache + Ford guide can resolve this known pilot vehicle.
+    r=acquire_vehicle(inp,FakeVpic(fail=True),ManufacturerCapabilityService())
+    assert r.identity.model == 'Expedition'
+    assert r.fact_value('tow_rating_lb') == 6000
+    assert r.facts['tow_rating_lb'].source == DataSource.MANUFACTURER
+    v=to_engine_vehicle_state(inp,r)
+    assert v.tow_rating_lb == 6000
