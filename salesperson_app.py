@@ -3,7 +3,8 @@ import re
 import streamlit as st
 
 from tow_match.models import MatchStatus
-from interface_logic import load_inventory, evaluate_inventory, apply_scope, available_lots, available_major_types, length_preference_rank
+from interface_logic import (load_inventory, evaluate_inventory, filter_matches, search_specific_unit, apply_scope,
+                             available_lots, available_major_types, available_brands)
 from vehicle_data.models import VehicleAcquisitionInput
 from vehicle_data.acquisition import acquire_vehicle, to_engine_vehicle_state
 from vehicle_data.nhtsa_vpic import NHTSAVpicClient
@@ -20,14 +21,15 @@ def init_state():
     defaults={
         'vehicle_ready':False,'payload':None,'tow_rating':None,'fw_rating':None,'vin':'',
         'adults':2,'children':0,'pets':0.0,'cargo':150.0,'category':'Travel Trailer',
-        'acquisition':None,'verify_target':None,
+        'acquisition':None,'verify_target':None,'matched_category':None,
     }
     for cat in CATEGORIES:
         slug=cat.lower().replace(' ','_')
         defaults[f'scope_{slug}']='This Lot'
         defaults[f'lot_{slug}']=''
-        defaults[f'condition_{slug}']='New'
+        defaults[f'condition_{slug}']='Any'
         defaults[f'length_{slug}']='Any'
+        defaults[f'brand_{slug}']='Any'
         defaults[f'major_type_{slug}']='Any'
         defaults[f'search_{slug}']=''
     for k,v in defaults.items(): st.session_state.setdefault(k,v)
@@ -89,10 +91,14 @@ def main():
         if st.button('New Tow Match',use_container_width=True): reset()
 
     with st.expander('1 · Tow Vehicle',expanded=not st.session_state.vehicle_ready):
-        st.caption('Start with the yellow-label payload. Scan/type VIN if available. Tow rating may be left blank.')
+        st.caption('Start with the yellow-label payload. Type the VIN if available. Tow rating may be left blank.')
         c1,c2,c3=st.columns(3)
         with c1:
             st.text_input('VIN (optional)',key='vin',placeholder='17-character VIN')
+            with st.popover('📷 Open camera'):
+                vin_photo=st.camera_input('Photograph VIN / vehicle label',key='vin_camera')
+                if vin_photo is not None:
+                    st.caption('Photo captured. For this pilot, read/type the 17-character VIN above; automatic VIN text extraction is not yet enabled.')
             st.number_input('Yellow-label payload (lb)',min_value=0.0,step=1.0,value=None,key='payload',placeholder='Required for useful matching')
         with c2:
             st.number_input('Conventional tow rating (lb, if already known)',min_value=0.0,step=100.0,value=None,key='tow_rating',placeholder='Tow Match will try to resolve it')
@@ -103,23 +109,23 @@ def main():
         d1,d2,d3=st.columns(3)
         with d1: st.number_input('Pets combined (lb)',min_value=0.0,step=10.0,key='pets')
         with d2: st.number_input('Truck cargo & gear (lb)',min_value=0.0,step=25.0,key='cargo')
-        with d3:
-            st.write('')
-            if st.button('Find Tow Matches',type='primary',use_container_width=True):
-                if st.session_state.payload is None:
-                    st.error('Enter the yellow-label payload number to start a useful Tow Match.')
-                else:
-                    _,result,_=acquire_for_category(st.session_state.category,live_lookup=True)
-                    st.session_state.acquisition=result
-                    st.session_state.vehicle_ready=True
-                    st.session_state.verify_target=None
-                    st.rerun()
+        with d3: st.segmented_control('RV Category',CATEGORIES,key='category')
+        if st.button('Find Tow Matches',type='primary',use_container_width=True):
+            if st.session_state.payload is None:
+                st.error('Enter the yellow-label payload number to start a useful Tow Match.')
+            else:
+                _,result,_=acquire_for_category(st.session_state.category,live_lookup=True)
+                st.session_state.acquisition=result
+                st.session_state.vehicle_ready=True
+                st.session_state.matched_category=st.session_state.category
+                st.session_state.verify_target=None
+                st.rerun()
 
     if not st.session_state.vehicle_ready:
         st.info('Enter the yellow-label payload and press **Find Tow Matches**. VIN and tow rating can be unknown.')
         return
 
-    category=st.segmented_control('RV Category',CATEGORIES,key='category') or 'Travel Trailer'
+    category=st.session_state.matched_category or st.session_state.category or 'Travel Trailer'
     inp,acq,vehicle=acquire_for_category(category,live_lookup=False)
     # Preserve identity/facts learned during the initial live acquisition; category recalculation only changes hitch default.
     prior=st.session_state.acquisition
@@ -134,41 +140,51 @@ def main():
     st.markdown(f'''<div class="tm-vehicle"><b>Active Tow Match</b> · {identity_text} · Payload <b>{fmt_num(vehicle.payload_lb)}</b> · Conventional tow rating <b>{fmt_num(vehicle.tow_rating_lb)}</b><br><span class="tm-muted">People {vehicle.occupant_weight_lb:,.0f} lb · Pets {vehicle.pets_weight_lb:,.0f} lb · Truck gear {vehicle.truck_cargo_lb:,.0f} lb</span></div>''',unsafe_allow_html=True)
     for warning in (prior.warnings if prior else []): st.caption('Vehicle note: '+warning)
 
-    st.subheader('2 · What are they shopping for?')
-    slug=category.lower().replace(' ','_')
     inventory=load_inventory()
-    c1,c2,c3,c4=st.columns([1.6,2.2,2.0,3.0])
-    with c1: condition=st.selectbox('Condition',['New','Used','Any'],key=f'condition_{slug}')
-    with c2: major_type=st.selectbox('Major Type',available_major_types(inventory,category),key=f'major_type_{slug}')
-    with c3: length=st.select_slider('Approx. length',['Any','Under 25 ft','25–30 ft','30–35 ft','35+ ft'],key=f'length_{slug}')
-    with c4: search=st.text_input('Specific unit search',placeholder='Model / manufacturer',key=f'search_{slug}')
+    evaluated=evaluate_inventory(inventory,vehicle,category)
+    slug=category.lower().replace(' ','_')
 
-    evaluated=evaluate_inventory(inventory,vehicle,category,condition,length,search,major_type)
-    lots=available_lots(inventory,category,condition)
+    # Scope is part of where the dealer can sell from, not a customer shopping preference.
+    lots=available_lots(inventory,category,'Any')
     lot_key=f'lot_{slug}'
     if lots and st.session_state.get(lot_key) not in lots:
         st.session_state[lot_key]=HOME_LOT if HOME_LOT in lots else lots[0]
-    scope=st.segmented_control('Search Scope',SCOPES,key=f'scope_{slug}') or 'This Lot'
-    if scope=='This Lot' and lots:
-        lot=st.selectbox('Current lot',lots,key=lot_key)
-    else: lot=st.session_state.get(lot_key)
-    shown=apply_scope(evaluated,scope,lot)
+    scope=st.segmented_control('Inventory Scope',SCOPES,key=f'scope_{slug}') or 'This Lot'
+    lot=st.selectbox('Current lot',lots,key=lot_key) if scope=='This Lot' and lots else st.session_state.get(lot_key)
+    qualified_scope=apply_scope(evaluated,scope,lot)
+
+    st.subheader('2 · Tow Matches')
+    base_counts={x:sum(1 for _,r in qualified_scope if r.status==x) for x in (MatchStatus.MATCH,MatchStatus.PRELIMINARY,MatchStatus.UNABLE)}
+    base_total=sum(base_counts.values())
+    m1,m2,m3,m4=st.columns(4)
+    m1.metric('Total Tow Matches',base_total); m2.metric('Match',base_counts[MatchStatus.MATCH]); m3.metric('Verify',base_counts[MatchStatus.PRELIMINARY]); m4.metric('Unable',base_counts[MatchStatus.UNABLE])
+
+    st.markdown('#### Filter Tow Matches')
+    c1,c2,c3,c4=st.columns(4)
+    with c1: condition=st.selectbox('Condition',['Any','New','Used'],key=f'condition_{slug}')
+    with c2: major_type=st.selectbox('Major Type',available_major_types(inventory,category),key=f'major_type_{slug}')
+    with c3: length=st.selectbox('Length',['Any','Under 20 ft','20–25 ft','25–30 ft','30–35 ft','35+ ft'],key=f'length_{slug}')
+    brands=available_brands(qualified_scope)
+    if st.session_state.get(f'brand_{slug}') not in brands: st.session_state[f'brand_{slug}']='Any'
+    with c4: brand=st.selectbox('Brand',brands,key=f'brand_{slug}')
+
+    shown=filter_matches(qualified_scope,condition,length,major_type,brand)
+    st.caption(f'**{len(shown)} of {base_total} Tow Matches shown** after filters.' if len(shown)!=base_total else f'**All {base_total} Tow Matches shown.**')
+
+    search=st.text_input('Specific Unit Search',placeholder='Stock number / model / manufacturer',key=f'search_{slug}')
+    if search:
+        searched=apply_scope(search_specific_unit(inventory,vehicle,category,search),scope,lot)
+        if searched:
+            st.caption('Specific Unit Search is independent of the filters above and can show a requested RV even when it is not a Tow Match.')
+            shown=searched
+        else:
+            st.warning('No unit matching that search was found in the selected inventory scope.')
+            shown=[]
 
     order={MatchStatus.MATCH:0,MatchStatus.PRELIMINARY:1,MatchStatus.UNABLE:2,MatchStatus.NOT_MATCH:3}
-    shown.sort(key=lambda x:(order.get(x[1].status,9),length_preference_rank(x[0],length),x[0]['display_title']))
-    counts={s:sum(1 for _,r in shown if r.status==s) for s in (MatchStatus.MATCH,MatchStatus.PRELIMINARY,MatchStatus.UNABLE)}
-    tow_total=sum(counts.values())
-
-    st.subheader('3 · Tow Matches')
-    m1,m2,m3,m4=st.columns(4)
-    m1.metric('Total Tow Matches',tow_total); m2.metric('Match',counts[MatchStatus.MATCH]); m3.metric('Verify',counts[MatchStatus.PRELIMINARY]); m4.metric('Unable',counts[MatchStatus.UNABLE])
-    if search and any(r.status==MatchStatus.NOT_MATCH for _,r in shown):
-        st.caption('Specific Unit Search can show a requested RV that is not a Tow Match so the salesperson can see why it was excluded.')
+    shown.sort(key=lambda x:(order.get(x[1].status,9),x[0]['display_title']))
     if not shown:
-        st.warning('No Tow Matches Found on This Lot' if scope=='This Lot' else 'No Tow Matches Found')
-        if scope=='This Lot':
-            broader=apply_scope(evaluated,'All Dealer Locations')
-            if broader: st.caption(f'{len(broader)} Tow Match result(s) exist at other dealer locations. Expand Search to see them.')
+        if not search: st.warning('No Tow Matches meet the current filters.')
         return
 
     for rv,res in shown:
