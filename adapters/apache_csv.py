@@ -68,9 +68,13 @@ def normalize_category(title, supplied, source_url=None)->str:
     return 'Travel Trailer'
 
 
-def infer_major_type(title, category):
-    t=str(title or '').lower()
-    # Floorplan-code hints are shopping attributes only; they never affect qualification.
+def infer_major_type(title, category, source_url=None):
+    t=str(title or '').lower(); u=str(source_url or '')
+    # Apache product URL taxonomy uses trailing -28 for Toy Hauler Travel Trailers.
+    # Treat this dealer-source taxonomy as stronger evidence than title inference.
+    if category=='Travel Trailer' and re.search(r'-28(?:$|[?#])', u):
+        return 'Toy Hauler'
+    # Floorplan/title hints are shopping attributes only; they never affect qualification.
     if 'toy hauler' in t or any(x in t for x in ('seismic','valor','triton')):
         return 'Toy Hauler'
     if category=='Truck Camper':
@@ -115,7 +119,7 @@ def load_apache_scraper_csv(path: str|Path):
         records.append({
             'display_title':title,
             'rv_category':category,
-            'major_type':infer_major_type(title,category),
+            'major_type':infer_major_type(title,category,source_url),
             'manufacturer':infer_manufacturer(title),
             'condition':str(r.get('Condition') or '').strip() or ('Used' if title.lower().startswith('used ') else 'New'),
             'location':normalize_location(r.get('Location')),
