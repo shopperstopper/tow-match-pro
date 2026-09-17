@@ -279,7 +279,7 @@ def main():
                     elif category=='Fifth Wheel' and res.qualification_load_lb is not None and res.upper_verify_load_lb is not None:
                         st.write(f"Normal pin estimate (20%): **{fmt_num(res.qualification_load_lb)}** · Upper pin estimate (25%): **{fmt_num(res.upper_verify_load_lb)}** · Available: **{fmt_num(res.available_payload_lb)}**")
                         if res.status==MatchStatus.PRELIMINARY and res.available_payload_lb is not None and res.qualification_load_lb<=res.available_payload_lb<res.upper_verify_load_lb: st.warning('Verify: qualifies at the normal 20% pin estimate, but could exceed available payload if loaded pin approaches 25%.')
-                    if res.reserve_lb is not None: st.write(f"Payload reserve: **{fmt_num(res.reserve_lb)}** · {res.reserve_label or ''}")
+                    if res.reserve_lb is not None: st.write(f"Payload reserve at qualification estimate: **{fmt_num(res.reserve_lb)}**")
                     for g in res.gates:
                         icon='✓' if g.passed is True else '△' if g.passed is None else '✕'
                         st.write(f"{icon} **{g.name}:** {g.message}")
