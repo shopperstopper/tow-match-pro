@@ -21,20 +21,19 @@ def length_filter_matches(rv, length_filter):
     return True
 
 def evaluate_inventory(inventory, vehicle, category):
-    """Qualify the entire category first. No shopping preferences are applied here."""
     out=[]
     for rv in inventory:
-        if rv.get('rv_category') != category: continue
-        if not rv.get('sellable', True): continue
+        if rv.get('rv_category') != category or not rv.get('sellable', True): continue
         res=match(vehicle,rv)
-        if res.status != MatchStatus.NOT_MATCH:
-            out.append((rv,res))
+        if res.status != MatchStatus.NOT_MATCH: out.append((rv,res))
     return out
 
-def filter_matches(evaluated, condition='Any', length_filter='Any', major_type='Any', brand='Any', search=''):
+def filter_matches(evaluated, condition='Any', length_filter='Any', major_type='Any', brand='Any', search='', status='All'):
     """Filter an already-qualified Tow Match set. Never calls the matching engine."""
     q=(search or '').strip().lower(); out=[]
+    status_map={'Match':MatchStatus.MATCH,'Verify':MatchStatus.PRELIMINARY,'Unable':MatchStatus.UNABLE}
     for rv,res in evaluated:
+        if status!='All' and res.status != status_map.get(status): continue
         if condition!='Any' and rv.get('condition')!=condition: continue
         if major_type!='Any' and rv.get('major_type')!=major_type: continue
         if brand!='Any' and (rv.get('manufacturer') or '')!=brand: continue
@@ -45,8 +44,18 @@ def filter_matches(evaluated, condition='Any', length_filter='Any', major_type='
         out.append((rv,res))
     return out
 
+def sort_matches(items, sort_by='Recommended'):
+    status_order={MatchStatus.MATCH:0,MatchStatus.PRELIMINARY:1,MatchStatus.UNABLE:2,MatchStatus.NOT_MATCH:3}
+    title=lambda x:(x[0].get('display_title') or '')
+    if sort_by=='Heaviest first': return sorted(items,key=lambda x:(x[1].estimated_loaded_lb is None,-(x[1].estimated_loaded_lb or 0),title(x)))
+    if sort_by=='Lightest first': return sorted(items,key=lambda x:(x[1].estimated_loaded_lb is None,(x[1].estimated_loaded_lb or 0),title(x)))
+    if sort_by=='Longest first': return sorted(items,key=lambda x:(x[0].get('overall_length_ft') is None,-(x[0].get('overall_length_ft') or 0),title(x)))
+    if sort_by=='Shortest first': return sorted(items,key=lambda x:(x[0].get('overall_length_ft') is None,(x[0].get('overall_length_ft') or 0),title(x)))
+    if sort_by=='Price low to high': return sorted(items,key=lambda x:(x[0].get('price_usd') is None,(x[0].get('price_usd') or 0),title(x)))
+    if sort_by=='Price high to low': return sorted(items,key=lambda x:(x[0].get('price_usd') is None,-(x[0].get('price_usd') or 0),title(x)))
+    return sorted(items,key=lambda x:(status_order.get(x[1].status,9),title(x)))
+
 def search_specific_unit(inventory, vehicle, category, search):
-    """Specific unit search is separate from shopping filters and may return Not Match."""
     q=(search or '').strip().lower()
     if not q: return []
     out=[]
@@ -57,10 +66,7 @@ def search_specific_unit(inventory, vehicle, category, search):
     return out
 
 def available_lots(inventory, category, condition='Any'):
-    return sorted({r.get('location') for r in inventory
-                   if r.get('rv_category')==category and r.get('inventory_status')=='On Lot'
-                   and r.get('sellable',True) and r.get('location')
-                   and (condition=='Any' or r.get('condition')==condition)})
+    return sorted({r.get('location') for r in inventory if r.get('rv_category')==category and r.get('inventory_status')=='On Lot' and r.get('sellable',True) and r.get('location') and (condition=='Any' or r.get('condition')==condition)})
 
 def apply_scope(evaluated, scope, lot=None):
     if scope=='This Lot': return [x for x in evaluated if x[0].get('location')==lot and x[0].get('inventory_status')=='On Lot']
@@ -68,11 +74,12 @@ def apply_scope(evaluated, scope, lot=None):
     return list(evaluated)
 
 def available_major_types(inventory, category):
-    preferred={'Travel Trailer':['Bunkhouse','Toy Hauler','Couples / Non-Bunkhouse'],
-               'Fifth Wheel':['Bunkhouse','Toy Hauler','Couples / Non-Bunkhouse'],
+    preferred={'Travel Trailer':['Bunkhouse','Toy Hauler','Rear Living','Rear Kitchen','Front Kitchen','Front Living','Mid-Bunk','Couples / Non-Bunkhouse'],
+               'Fifth Wheel':['Bunkhouse','Toy Hauler','Rear Living','Rear Kitchen','Front Kitchen','Front Living','Mid-Bunk','Couples / Non-Bunkhouse'],
                'Truck Camper':['Hard-Side','Pop-Up']}.get(category,[])
-    present={r.get('major_type') for r in inventory if r.get('rv_category')==category and r.get('major_type')}
-    return ['Any']+[x for x in preferred if x in present]
+    # Show the dealer's useful filter vocabulary even when the current scope has zero units of a type.
+    # This keeps Toy Hauler and other expected choices from disappearing between lots.
+    return ['Any']+preferred
 
 def available_brands(evaluated):
     return ['Any']+sorted({rv.get('manufacturer') for rv,_ in evaluated if rv.get('manufacturer')})
