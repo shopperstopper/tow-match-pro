@@ -22,6 +22,7 @@ def init_state():
         'vehicle_ready':False,'payload':None,'tow_rating':None,'fw_rating':None,'vin':'',
         'adults':2,'children':0,'pets':0.0,'cargo':150.0,'category':'Travel Trailer',
         'acquisition':None,'verify_target':None,'matched_category':None,
+        'edit_people_open':False,'edit_vehicle_open':False,
     }
     for cat in CATEGORIES:
         slug=cat.lower().replace(' ','_')
@@ -101,16 +102,16 @@ def main():
                 with st.popover('📷 Open camera'):
                     vin_photo=st.camera_input('Photograph VIN / vehicle label',key='vin_camera')
                     if vin_photo is not None: st.caption('Photo captured. For this pilot, read/type the 17-character VIN above; automatic VIN text extraction is not yet enabled.')
-                st.number_input('Yellow-label payload (lb)',min_value=0.0,step=1.0,value=None,key='payload',placeholder='Required for useful matching')
+                st.number_input('Yellow-label payload (lb)',min_value=0,step=1,value=None,key='payload',placeholder='Required for useful matching')
             with c2:
-                st.number_input('Conventional tow rating (lb, if already known)',min_value=0.0,step=100.0,value=None,key='tow_rating',placeholder='Tow Match will try to resolve it')
-                st.number_input('Fifth-wheel rating (lb, if already known)',min_value=0.0,step=100.0,value=None,key='fw_rating',placeholder='Leave blank if unknown')
+                st.number_input('Conventional tow rating (lb, if already known)',min_value=0,step=100,value=None,key='tow_rating',placeholder='Tow Match will try to resolve it')
+                st.number_input('Fifth-wheel rating (lb, if already known)',min_value=0,step=100,value=None,key='fw_rating',placeholder='Leave blank if unknown')
             with c3:
                 st.number_input('Adults 13+',min_value=0,max_value=10,step=1,key='adults')
                 st.number_input('Children 2–12',min_value=0,max_value=10,step=1,key='children')
             d1,d2,d3=st.columns(3)
-            with d1: st.number_input('Pets combined (lb)',min_value=0.0,step=10.0,key='pets')
-            with d2: st.number_input('Truck cargo & gear (lb)',min_value=0.0,step=25.0,key='cargo')
+            with d1: st.number_input('Pets combined (lb)',min_value=0,step=10,key='pets')
+            with d2: st.number_input('Truck cargo & gear (lb)',min_value=0,step=25,key='cargo')
             with d3: st.segmented_control('RV Category',CATEGORIES,key='category')
             if st.button('Find Tow Matches',type='primary',use_container_width=True):
                 if st.session_state.payload is None: st.error('Enter the yellow-label payload number to start a useful Tow Match.')
@@ -144,23 +145,45 @@ def main():
     st.markdown(f'''<div class="tm-vehicle"><b>Active Tow Match</b> · {identity_text} · Payload <b>{fmt_num(vehicle.payload_lb)}</b> · {rating_label} <b>{fmt_num(rating_value)}</b><br><span class="tm-muted">People {vehicle.occupant_weight_lb:,.0f} lb · Pets {vehicle.pets_weight_lb:,.0f} lb · Truck gear {vehicle.truck_cargo_lb:,.0f} lb</span></div>''',unsafe_allow_html=True)
     e1,e2,_=st.columns([1.25,1.25,5])
     with e1:
-        with st.popover('Edit People & Cargo',use_container_width=True):
-            with st.form('edit_people_cargo'):
-                adults=st.number_input('Adults 13+',0,10,int(st.session_state.adults),1)
-                children=st.number_input('Children 2–12',0,10,int(st.session_state.children),1)
-                pets=st.number_input('Pets combined (lb)',0.0,value=float(st.session_state.pets),step=10.0)
-                cargo=st.number_input('Truck cargo & gear (lb)',0.0,value=float(st.session_state.cargo),step=25.0)
-                if st.form_submit_button('Update Tow Matches',type='primary'):
-                    st.session_state.adults=adults; st.session_state.children=children; st.session_state.pets=pets; st.session_state.cargo=cargo; st.rerun()
+        if st.button('Edit People & Cargo',use_container_width=True):
+            st.session_state.edit_people_open=not st.session_state.edit_people_open
+            st.session_state.edit_vehicle_open=False
     with e2:
-        with st.popover('Correct Vehicle Data',use_container_width=True):
+        if st.button('Correct Vehicle Data',use_container_width=True):
+            st.session_state.edit_vehicle_open=not st.session_state.edit_vehicle_open
+            st.session_state.edit_people_open=False
+
+    if st.session_state.edit_people_open:
+        with st.container(border=True):
+            st.markdown('**Edit People & Cargo**')
+            with st.form('edit_people_cargo'):
+                pc1,pc2,pc3,pc4=st.columns(4)
+                with pc1: adults=st.number_input('Adults 13+',0,10,int(st.session_state.adults),1)
+                with pc2: children=st.number_input('Children 2–12',0,10,int(st.session_state.children),1)
+                with pc3: pets=st.number_input('Pets combined (lb)',min_value=0,value=int(round(st.session_state.pets)),step=10)
+                with pc4: cargo=st.number_input('Truck cargo & gear (lb)',min_value=0,value=int(round(st.session_state.cargo)),step=25)
+                if st.form_submit_button('Update Tow Matches',type='primary'):
+                    st.session_state.adults=adults; st.session_state.children=children
+                    st.session_state.pets=pets; st.session_state.cargo=cargo
+                    st.session_state.edit_people_open=False
+                    st.rerun()
+
+    if st.session_state.edit_vehicle_open:
+        with st.container(border=True):
+            st.markdown('**Correct Vehicle Data**')
             st.caption(f"VIN / vehicle identity locked: {st.session_state.vin or identity_text}")
+            st.caption('Current effective values are shown below. Leave an unknown rating blank.')
             with st.form('correct_vehicle_data'):
-                payload=st.number_input('Yellow-label payload (lb)',min_value=0.0,value=float(st.session_state.payload or 0),step=1.0)
-                tow=st.number_input('Conventional tow rating (lb)',min_value=0.0,value=float(st.session_state.tow_rating or 0),step=100.0,help='Use 0 if still unknown.')
-                fw=st.number_input('Fifth-wheel rating (lb)',min_value=0.0,value=float(st.session_state.fw_rating or 0),step=100.0,help='Use 0 if still unknown.')
+                vc1,vc2,vc3=st.columns(3)
+                with vc1: payload=st.number_input('Yellow-label payload (lb)',min_value=0,value=int(round(vehicle.payload_lb)) if vehicle.payload_lb is not None else None,step=1,placeholder='Unknown')
+                with vc2: tow=st.number_input('Conventional tow rating (lb)',min_value=0,value=int(round(vehicle.tow_rating_lb)) if vehicle.tow_rating_lb is not None else None,step=100,placeholder='Unknown')
+                with vc3: fw=st.number_input('Fifth-wheel rating (lb)',min_value=0,value=int(round(vehicle.fifth_wheel_tow_rating_lb)) if vehicle.fifth_wheel_tow_rating_lb is not None else None,step=100,placeholder='Unknown')
                 if st.form_submit_button('Correct & Recalculate',type='primary'):
-                    st.session_state.payload=payload or None; st.session_state.tow_rating=tow or None; st.session_state.fw_rating=fw or None; st.rerun()
+                    st.session_state.payload=payload
+                    st.session_state.tow_rating=tow
+                    st.session_state.fw_rating=fw
+                    st.session_state.edit_vehicle_open=False
+                    st.rerun()
     for warning in (prior.warnings if prior else []): st.caption('Vehicle note: '+warning)
 
     selected_category=st.segmented_control('RV Category',CATEGORIES,key='category') or category
