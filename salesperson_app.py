@@ -4,7 +4,7 @@ import streamlit as st
 
 from tow_match.models import MatchStatus
 from interface_logic import (load_inventory, evaluate_inventory, filter_matches, search_specific_unit, apply_scope,
-                             available_lots, available_major_types, available_brands)
+                             available_lots, available_major_types, available_brands, sort_matches)
 from vehicle_data.models import VehicleAcquisitionInput
 from vehicle_data.acquisition import acquire_vehicle, to_engine_vehicle_state
 from vehicle_data.nhtsa_vpic import NHTSAVpicClient
@@ -32,6 +32,8 @@ def init_state():
         defaults[f'brand_{slug}']='Any'
         defaults[f'major_type_{slug}']='Any'
         defaults[f'search_{slug}']=''
+        defaults[f'status_{slug}']='All'
+        defaults[f'sort_{slug}']='Recommended'
     for k,v in defaults.items(): st.session_state.setdefault(k,v)
 
 
@@ -91,35 +93,35 @@ def main():
         if st.button('New Tow Match',use_container_width=True): reset()
 
     with st.expander('1 · Tow Vehicle',expanded=not st.session_state.vehicle_ready):
-        st.caption('Start with the yellow-label payload. Type the VIN if available. Tow rating may be left blank.')
-        c1,c2,c3=st.columns(3)
-        with c1:
-            st.text_input('VIN (optional)',key='vin',placeholder='17-character VIN')
-            with st.popover('📷 Open camera'):
-                vin_photo=st.camera_input('Photograph VIN / vehicle label',key='vin_camera')
-                if vin_photo is not None:
-                    st.caption('Photo captured. For this pilot, read/type the 17-character VIN above; automatic VIN text extraction is not yet enabled.')
-            st.number_input('Yellow-label payload (lb)',min_value=0.0,step=1.0,value=None,key='payload',placeholder='Required for useful matching')
-        with c2:
-            st.number_input('Conventional tow rating (lb, if already known)',min_value=0.0,step=100.0,value=None,key='tow_rating',placeholder='Tow Match will try to resolve it')
-            st.number_input('Fifth-wheel rating (lb, if already known)',min_value=0.0,step=100.0,value=None,key='fw_rating',placeholder='Leave blank if unknown')
-        with c3:
-            st.number_input('Adults 13+',min_value=0,max_value=10,step=1,key='adults')
-            st.number_input('Children 2–12',min_value=0,max_value=10,step=1,key='children')
-        d1,d2,d3=st.columns(3)
-        with d1: st.number_input('Pets combined (lb)',min_value=0.0,step=10.0,key='pets')
-        with d2: st.number_input('Truck cargo & gear (lb)',min_value=0.0,step=25.0,key='cargo')
-        with d3: st.segmented_control('RV Category',CATEGORIES,key='category')
-        if st.button('Find Tow Matches',type='primary',use_container_width=True):
-            if st.session_state.payload is None:
-                st.error('Enter the yellow-label payload number to start a useful Tow Match.')
-            else:
-                _,result,_=acquire_for_category(st.session_state.category,live_lookup=True)
-                st.session_state.acquisition=result
-                st.session_state.vehicle_ready=True
-                st.session_state.matched_category=st.session_state.category
-                st.session_state.verify_target=None
-                st.rerun()
+        if not st.session_state.vehicle_ready:
+            st.caption('Start with the yellow-label payload. Type the VIN if available. Tow rating may be left blank.')
+            c1,c2,c3=st.columns(3)
+            with c1:
+                st.text_input('VIN (optional)',key='vin',placeholder='17-character VIN')
+                with st.popover('📷 Open camera'):
+                    vin_photo=st.camera_input('Photograph VIN / vehicle label',key='vin_camera')
+                    if vin_photo is not None: st.caption('Photo captured. For this pilot, read/type the 17-character VIN above; automatic VIN text extraction is not yet enabled.')
+                st.number_input('Yellow-label payload (lb)',min_value=0.0,step=1.0,value=None,key='payload',placeholder='Required for useful matching')
+            with c2:
+                st.number_input('Conventional tow rating (lb, if already known)',min_value=0.0,step=100.0,value=None,key='tow_rating',placeholder='Tow Match will try to resolve it')
+                st.number_input('Fifth-wheel rating (lb, if already known)',min_value=0.0,step=100.0,value=None,key='fw_rating',placeholder='Leave blank if unknown')
+            with c3:
+                st.number_input('Adults 13+',min_value=0,max_value=10,step=1,key='adults')
+                st.number_input('Children 2–12',min_value=0,max_value=10,step=1,key='children')
+            d1,d2,d3=st.columns(3)
+            with d1: st.number_input('Pets combined (lb)',min_value=0.0,step=10.0,key='pets')
+            with d2: st.number_input('Truck cargo & gear (lb)',min_value=0.0,step=25.0,key='cargo')
+            with d3: st.segmented_control('RV Category',CATEGORIES,key='category')
+            if st.button('Find Tow Matches',type='primary',use_container_width=True):
+                if st.session_state.payload is None: st.error('Enter the yellow-label payload number to start a useful Tow Match.')
+                else:
+                    _,result,_=acquire_for_category(st.session_state.category,live_lookup=True)
+                    st.session_state.acquisition=result; st.session_state.vehicle_ready=True
+                    st.session_state.matched_category=st.session_state.category; st.session_state.verify_target=None
+                    st.rerun()
+        else:
+            st.caption('Vehicle identity is locked for this Tow Match. Use **New Tow Match** for a different vehicle.')
+            st.write(f"VIN: **{st.session_state.vin or 'Not entered'}**")
 
     if not st.session_state.vehicle_ready:
         st.info('Enter the yellow-label payload and press **Find Tow Matches**. VIN and tow rating can be unknown.')
@@ -137,8 +139,35 @@ def main():
 
     ident=acq.identity
     identity_text=' '.join(str(x) for x in (ident.year,ident.make,ident.model,ident.trim) if x) or (st.session_state.vin or 'Vehicle')
-    st.markdown(f'''<div class="tm-vehicle"><b>Active Tow Match</b> · {identity_text} · Payload <b>{fmt_num(vehicle.payload_lb)}</b> · Conventional tow rating <b>{fmt_num(vehicle.tow_rating_lb)}</b><br><span class="tm-muted">People {vehicle.occupant_weight_lb:,.0f} lb · Pets {vehicle.pets_weight_lb:,.0f} lb · Truck gear {vehicle.truck_cargo_lb:,.0f} lb</span></div>''',unsafe_allow_html=True)
+    rating_label='Fifth-wheel tow rating' if category=='Fifth Wheel' else 'Conventional tow rating'
+    rating_value=vehicle.fifth_wheel_tow_rating_lb if category=='Fifth Wheel' else vehicle.tow_rating_lb
+    st.markdown(f'''<div class="tm-vehicle"><b>Active Tow Match</b> · {identity_text} · Payload <b>{fmt_num(vehicle.payload_lb)}</b> · {rating_label} <b>{fmt_num(rating_value)}</b><br><span class="tm-muted">People {vehicle.occupant_weight_lb:,.0f} lb · Pets {vehicle.pets_weight_lb:,.0f} lb · Truck gear {vehicle.truck_cargo_lb:,.0f} lb</span></div>''',unsafe_allow_html=True)
+    e1,e2,_=st.columns([1.25,1.25,5])
+    with e1:
+        with st.popover('Edit People & Cargo',use_container_width=True):
+            with st.form('edit_people_cargo'):
+                adults=st.number_input('Adults 13+',0,10,int(st.session_state.adults),1)
+                children=st.number_input('Children 2–12',0,10,int(st.session_state.children),1)
+                pets=st.number_input('Pets combined (lb)',0.0,value=float(st.session_state.pets),step=10.0)
+                cargo=st.number_input('Truck cargo & gear (lb)',0.0,value=float(st.session_state.cargo),step=25.0)
+                if st.form_submit_button('Update Tow Matches',type='primary'):
+                    st.session_state.adults=adults; st.session_state.children=children; st.session_state.pets=pets; st.session_state.cargo=cargo; st.rerun()
+    with e2:
+        with st.popover('Correct Vehicle Data',use_container_width=True):
+            st.caption(f"VIN / vehicle identity locked: {st.session_state.vin or identity_text}")
+            with st.form('correct_vehicle_data'):
+                payload=st.number_input('Yellow-label payload (lb)',min_value=0.0,value=float(st.session_state.payload or 0),step=1.0)
+                tow=st.number_input('Conventional tow rating (lb)',min_value=0.0,value=float(st.session_state.tow_rating or 0),step=100.0,help='Use 0 if still unknown.')
+                fw=st.number_input('Fifth-wheel rating (lb)',min_value=0.0,value=float(st.session_state.fw_rating or 0),step=100.0,help='Use 0 if still unknown.')
+                if st.form_submit_button('Correct & Recalculate',type='primary'):
+                    st.session_state.payload=payload or None; st.session_state.tow_rating=tow or None; st.session_state.fw_rating=fw or None; st.rerun()
     for warning in (prior.warnings if prior else []): st.caption('Vehicle note: '+warning)
+
+    selected_category=st.segmented_control('RV Category',CATEGORIES,key='category') or category
+    if selected_category != category:
+        st.session_state.matched_category=selected_category
+        st.session_state.verify_target=None
+        st.rerun()
 
     inventory=load_inventory()
     evaluated=evaluate_inventory(inventory,vehicle,category)
@@ -156,19 +185,29 @@ def main():
     st.subheader('2 · Tow Matches')
     base_counts={x:sum(1 for _,r in qualified_scope if r.status==x) for x in (MatchStatus.MATCH,MatchStatus.PRELIMINARY,MatchStatus.UNABLE)}
     base_total=sum(base_counts.values())
+    status_key=f'status_{slug}'
+    st.caption('Click a status tile to isolate those results. Click Total Tow Matches to show all.')
     m1,m2,m3,m4=st.columns(4)
-    m1.metric('Total Tow Matches',base_total); m2.metric('Match',base_counts[MatchStatus.MATCH]); m3.metric('Verify',base_counts[MatchStatus.PRELIMINARY]); m4.metric('Unable',base_counts[MatchStatus.UNABLE])
+    with m1:
+        if st.button(f'Total Tow Matches  ·  {base_total}',key=f'tile_total_{slug}',use_container_width=True): st.session_state[status_key]='All'; st.rerun()
+    with m2:
+        if st.button(f'Match  ·  {base_counts[MatchStatus.MATCH]}',key=f'tile_match_{slug}',use_container_width=True): st.session_state[status_key]='Match'; st.rerun()
+    with m3:
+        if st.button(f'Verify  ·  {base_counts[MatchStatus.PRELIMINARY]}',key=f'tile_verify_{slug}',use_container_width=True): st.session_state[status_key]='Verify'; st.rerun()
+    with m4:
+        if st.button(f'Unable  ·  {base_counts[MatchStatus.UNABLE]}',key=f'tile_unable_{slug}',use_container_width=True): st.session_state[status_key]='Unable'; st.rerun()
 
-    st.markdown('#### Filter Tow Matches')
-    c1,c2,c3,c4=st.columns(4)
+    st.markdown('#### Filter & Sort Tow Matches')
+    c1,c2,c3,c4,c5=st.columns(5)
     with c1: condition=st.selectbox('Condition',['Any','New','Used'],key=f'condition_{slug}')
-    with c2: major_type=st.selectbox('Major Type',available_major_types(inventory,category),key=f'major_type_{slug}')
+    with c2: major_type=st.selectbox('Type / Floorplan',available_major_types(inventory,category),key=f'major_type_{slug}')
     with c3: length=st.selectbox('Length',['Any','Under 20 ft','20–25 ft','25–30 ft','30–35 ft','35+ ft'],key=f'length_{slug}')
     brands=available_brands(qualified_scope)
     if st.session_state.get(f'brand_{slug}') not in brands: st.session_state[f'brand_{slug}']='Any'
     with c4: brand=st.selectbox('Brand',brands,key=f'brand_{slug}')
+    with c5: sort_by=st.selectbox('Sort',['Recommended','Heaviest first','Lightest first','Longest first','Shortest first','Price low to high','Price high to low'],key=f'sort_{slug}')
 
-    shown=filter_matches(qualified_scope,condition,length,major_type,brand)
+    shown=filter_matches(qualified_scope,condition,length,major_type,brand,status=st.session_state.get(status_key,'All'))
     st.caption(f'**{len(shown)} of {base_total} Tow Matches shown** after filters.' if len(shown)!=base_total else f'**All {base_total} Tow Matches shown.**')
 
     search=st.text_input('Specific Unit Search',placeholder='Stock number / model / manufacturer',key=f'search_{slug}')
@@ -181,8 +220,7 @@ def main():
             st.warning('No unit matching that search was found in the selected inventory scope.')
             shown=[]
 
-    order={MatchStatus.MATCH:0,MatchStatus.PRELIMINARY:1,MatchStatus.UNABLE:2,MatchStatus.NOT_MATCH:3}
-    shown.sort(key=lambda x:(order.get(x[1].status,9),x[0]['display_title']))
+    shown=sort_matches(shown,sort_by if not search else 'Recommended')
     if not shown:
         if not search: st.warning('No Tow Matches meet the current filters.')
         return
@@ -196,7 +234,12 @@ def main():
             with mid:
                 st.markdown(f"### {rv['display_title']}")
                 bits=[rv['rv_category'],f"{rv['overall_length_ft']:.1f} ft" if rv['overall_length_ft'] else None,rv['condition'],rv['location'],rv['inventory_status']]
-                st.write(' · '.join(x for x in bits if x)); st.markdown(f"**{status_label(res.status)}**")
+                st.write(' · '.join(x for x in bits if x))
+                facts=[]
+                if res.estimated_loaded_lb is not None: facts.append(f"Est. loaded **{fmt_num(res.estimated_loaded_lb)}**")
+                if rv.get('price_usd') is not None: facts.append(f"Price **${rv['price_usd']:,.0f}**")
+                if facts: st.write(' · '.join(facts))
+                st.markdown(f"**{status_label(res.status)}**")
                 if res.status==MatchStatus.UNABLE:
                     st.caption('Missing: '+', '.join(res.missing_information))
                 elif res.status==MatchStatus.PRELIMINARY and res.missing_information:
@@ -207,6 +250,12 @@ def main():
                 with st.expander('Why This Matches' if res.status!=MatchStatus.NOT_MATCH else 'Why This Is Not a Match'):
                     st.write(f"Estimated normal loaded weight: **{fmt_num(res.estimated_loaded_lb)}**")
                     st.write(f"Qualification tongue/pin/load: **{fmt_num(res.qualification_load_lb)}**")
+                    if category=='Travel Trailer' and res.qualification_load_lb is not None and res.upper_verify_load_lb is not None:
+                        st.write(f"Normal tongue estimate (13%): **{fmt_num(res.qualification_load_lb)}** · Upper tongue estimate (15%): **{fmt_num(res.upper_verify_load_lb)}** · Available: **{fmt_num(res.available_payload_lb)}**")
+                        if res.status==MatchStatus.PRELIMINARY and res.available_payload_lb is not None and res.qualification_load_lb<=res.available_payload_lb<res.upper_verify_load_lb: st.warning('Verify: qualifies at the normal 13% tongue estimate, but could exceed available payload if loaded tongue approaches 15%.')
+                    elif category=='Fifth Wheel' and res.qualification_load_lb is not None and res.upper_verify_load_lb is not None:
+                        st.write(f"Normal pin estimate (20%): **{fmt_num(res.qualification_load_lb)}** · Upper pin estimate (25%): **{fmt_num(res.upper_verify_load_lb)}** · Available: **{fmt_num(res.available_payload_lb)}**")
+                        if res.status==MatchStatus.PRELIMINARY and res.available_payload_lb is not None and res.qualification_load_lb<=res.available_payload_lb<res.upper_verify_load_lb: st.warning('Verify: qualifies at the normal 20% pin estimate, but could exceed available payload if loaded pin approaches 25%.')
                     if res.reserve_lb is not None: st.write(f"Payload reserve: **{fmt_num(res.reserve_lb)}** · {res.reserve_label or ''}")
                     for g in res.gates:
                         icon='✓' if g.passed is True else '△' if g.passed is None else '✕'
