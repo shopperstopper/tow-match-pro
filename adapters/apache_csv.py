@@ -70,25 +70,31 @@ def normalize_category(title, supplied, source_url=None)->str:
 
 def infer_major_type(title, category, source_url=None):
     t=str(title or '').lower(); u=str(source_url or '')
-    # Apache product URL taxonomy uses trailing -28 for Toy Hauler Travel Trailers.
-    # Treat this dealer-source taxonomy as stronger evidence than title inference.
+    # Dealer-source taxonomy is stronger than model-name inference.
     if category=='Travel Trailer' and re.search(r'-28(?:$|[?#])', u):
         return 'Toy Hauler'
-    # Floorplan/title hints are shopping attributes only; they never affect qualification.
     if 'toy hauler' in t or any(x in t for x in ('seismic','valor','triton')):
         return 'Toy Hauler'
     if category=='Truck Camper':
         if any(x in t for x in ('pop-up','pop up','cirrus 620','cirrus 820','scout ')):
             return 'Pop-Up'
         return 'Hard-Side'
-    if 'bunk' in t or re.search(r'(?:\b|\d)(?:bh|bhs|sbh|qb|mb)(?:\b|$)', t): return 'Bunkhouse'
     if category in ('Travel Trailer','Fifth Wheel'):
-        # Common floorplan suffixes. Keep these conservative and single-valued for the pilot UI.
-        if re.search(r'(?:\d|\b)fl(?:\b|$)', t) or 'front living' in t: return 'Front Living'
-        if re.search(r'(?:\d|\b)fk(?:b|bs)?(?:\b|$)', t) or 'front kitchen' in t: return 'Front Kitchen'
-        if re.search(r'(?:\d|\b)rk(?:s|we)?(?:\b|$)', t) or 'rear kitchen' in t: return 'Rear Kitchen'
-        if re.search(r'(?:\d|\b)rl(?:s|we)?(?:\b|$)', t) or 'rear living' in t: return 'Rear Living'
-        if 'mid bunk' in t or 'mid-bunk' in t: return 'Mid-Bunk'
+        # Family/bunk layouts. Include common manufacturer suffix extensions such as
+        # BHWE, BRDS and BKS rather than requiring BH/BHS to end the model code.
+        if ('bunkhouse' in t or 'bunk house' in t or 'hidden bunk' in t or
+            re.search(r'\d(?:bh|bhs|sbh|brds|bks)(?:[a-z]{0,2})?(?:\b|$)', t)):
+            return 'Bunkhouse'
+        # Mid-bunk is intentionally distinct from generic Bunkhouse in the shopping UI.
+        if 'mid bunk' in t or 'mid-bunk' in t:
+            return 'Mid-Bunk'
+        # Common floorplan suffixes. These are shopping attributes only and never
+        # affect towing qualification. Longer suffix variants (RLSW, SRK, etc.) are
+        # accepted where their directional meaning is well established.
+        if 'front living' in t or re.search(r'\d(?:fl|fls)(?:[a-z]{0,2})?(?:\b|$)', t): return 'Front Living'
+        if 'front kitchen' in t or re.search(r'\d(?:fk|cfk)(?:[a-z]{0,2})?(?:\b|$)', t): return 'Front Kitchen'
+        if 'rear kitchen' in t or re.search(r'\d(?:rk|rks|srk)(?:[a-z]{0,2})?(?:\b|$)', t): return 'Rear Kitchen'
+        if 'rear living' in t or re.search(r'\d(?:rl|rls)(?:[a-z]{0,2})?(?:\b|$)', t): return 'Rear Living'
         return 'Couples / Non-Bunkhouse'
     return None
 
