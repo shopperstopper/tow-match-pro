@@ -10,7 +10,12 @@ _WEIGHTS = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2]
 
 def normalize_vin(vin: Optional[str]) -> Optional[str]:
     if not vin: return None
-    return re.sub(r'[^A-Za-z0-9]', '', vin).upper()
+    raw=str(vin).strip().upper()
+    # Salespeople commonly paste values such as "VIN: 1FT..." from a dealer VDP.
+    # Prefer an embedded VIN-shaped token before falling back to legacy cleanup.
+    m=re.search(r'(?<![A-Z0-9])([A-HJ-NPR-Z0-9]{17})(?![A-Z0-9])', raw)
+    if m: return m.group(1)
+    return re.sub(r'[^A-Za-z0-9]', '', raw).upper()
 
 def vin_is_valid(vin: Optional[str]) -> bool:
     vin = normalize_vin(vin)
