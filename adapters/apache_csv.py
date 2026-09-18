@@ -68,35 +68,52 @@ def normalize_category(title, supplied, source_url=None)->str:
     return 'Travel Trailer'
 
 
-def infer_major_type(title, category, source_url=None):
+def infer_rv_style(title, category, source_url=None):
+    """Sales shopping style, separate from interior floorplan."""
     t=str(title or '').lower(); u=str(source_url or '')
-    # Dealer-source taxonomy is stronger than model-name inference.
-    if category=='Travel Trailer' and re.search(r'-28(?:$|[?#])', u):
-        return 'Toy Hauler'
-    if 'toy hauler' in t or any(x in t for x in ('seismic','valor','triton')):
-        return 'Toy Hauler'
     if category=='Truck Camper':
         if any(x in t for x in ('pop-up','pop up','cirrus 620','cirrus 820','scout ')):
             return 'Pop-Up'
         return 'Hard-Side'
-    if category in ('Travel Trailer','Fifth Wheel'):
-        # Family/bunk layouts. Include common manufacturer suffix extensions such as
-        # BHWE, BRDS and BKS rather than requiring BH/BHS to end the model code.
-        if ('bunkhouse' in t or 'bunk house' in t or 'hidden bunk' in t or
-            re.search(r'\d(?:bh|bhs|sbh|brds|bks)(?:[a-z]{0,2})?(?:\b|$)', t)):
-            return 'Bunkhouse'
-        # Mid-bunk is intentionally distinct from generic Bunkhouse in the shopping UI.
-        if 'mid bunk' in t or 'mid-bunk' in t:
-            return 'Mid-Bunk'
-        # Common floorplan suffixes. These are shopping attributes only and never
-        # affect towing qualification. Longer suffix variants (RLSW, SRK, etc.) are
-        # accepted where their directional meaning is well established.
-        if 'front living' in t or re.search(r'\d(?:fl|fls)(?:[a-z]{0,2})?(?:\b|$)', t): return 'Front Living'
-        if 'front kitchen' in t or re.search(r'\d(?:fk|cfk)(?:[a-z]{0,2})?(?:\b|$)', t): return 'Front Kitchen'
-        if 'rear kitchen' in t or re.search(r'\d(?:rk|rks|srk)(?:[a-z]{0,2})?(?:\b|$)', t): return 'Rear Kitchen'
-        if 'rear living' in t or re.search(r'\d(?:rl|rls)(?:[a-z]{0,2})?(?:\b|$)', t): return 'Rear Living'
-        return 'Couples / Non-Bunkhouse'
+    if category=='Travel Trailer':
+        # Apache dealer taxonomy -28 identifies towable toy-hauler inventory.
+        if re.search(r'-28(?:$|[?#])', u) or 'toy hauler' in t or any(x in t for x in ('seismic','valor','triton')):
+            return 'Toy Hauler'
+        if 'aliner' in t or 'a-frame' in t or 'a frame' in t:
+            return 'A-Frame / Folding / Pop Up'
+        if re.search(r'\bnucamp rv tab\b', t) or 'teardrop' in t:
+            return 'Teardrop'
+        return 'Conventional Travel Trailer'
+    if category=='Fifth Wheel':
+        if 'toy hauler' in t or any(x in t for x in ('seismic','valor','triton')):
+            return 'Toy Hauler'
+        return 'Conventional Fifth Wheel'
     return None
+
+
+def infer_floorplan(title, category, source_url=None):
+    """Interior/layout shopping attribute. Never affects tow qualification."""
+    t=str(title or '').lower()
+    if category not in ('Travel Trailer','Fifth Wheel'):
+        return None
+    if ('bunkhouse' in t or 'bunk house' in t or 'hidden bunk' in t or
+        re.search(r'\d(?:bh|bhs|sbh|brds|bks)(?:[a-z]{0,2})?(?:\b|$)', t)):
+        return 'Bunkhouse'
+    if 'mid bunk' in t or 'mid-bunk' in t:
+        return 'Mid-Bunk'
+    if 'front living' in t or re.search(r'\d(?:fl|fls)(?:[a-z]{0,2})?(?:\b|$)', t): return 'Front Living'
+    if 'front kitchen' in t or re.search(r'\d(?:fk|cfk)(?:[a-z]{0,2})?(?:\b|$)', t): return 'Front Kitchen'
+    if 'rear kitchen' in t or re.search(r'\d(?:rk|rks|srk)(?:[a-z]{0,2})?(?:\b|$)', t): return 'Rear Kitchen'
+    if 'rear living' in t or re.search(r'\d(?:rl|rls)(?:[a-z]{0,2})?(?:\b|$)', t): return 'Rear Living'
+    return 'Couples / Non-Bunkhouse'
+
+
+def infer_major_type(title, category, source_url=None):
+    """Backward-compatible legacy field; new UI uses rv_style + floorplan."""
+    style=infer_rv_style(title,category,source_url)
+    if category=='Truck Camper' or style=='Toy Hauler':
+        return style
+    return infer_floorplan(title,category,source_url)
 
 def normalize_location(v):
     s=str(v or '').strip()
@@ -126,6 +143,8 @@ def load_apache_scraper_csv(path: str|Path):
             'display_title':title,
             'rv_category':category,
             'major_type':infer_major_type(title,category,source_url),
+            'rv_style':infer_rv_style(title,category,source_url),
+            'floorplan':infer_floorplan(title,category,source_url),
             'manufacturer':infer_manufacturer(title),
             'condition':str(r.get('Condition') or '').strip() or ('Used' if title.lower().startswith('used ') else 'New'),
             'location':normalize_location(r.get('Location')),
