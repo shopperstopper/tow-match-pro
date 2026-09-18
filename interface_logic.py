@@ -28,7 +28,7 @@ def evaluate_inventory(inventory, vehicle, category):
         if res.status != MatchStatus.NOT_MATCH: out.append((rv,res))
     return out
 
-def filter_matches(evaluated, condition='Any', length_filter='Any', major_type='Any', brand='Any', search='', status='All'):
+def filter_matches(evaluated, condition='Any', length_filter='Any', major_type='Any', brand='Any', search='', status='All', rv_style='Any', floorplan='Any'):
     """Filter an already-qualified Tow Match set. Never calls the matching engine."""
     q=(search or '').strip().lower(); out=[]
     status_map={'Match':MatchStatus.MATCH,'Verify':MatchStatus.PRELIMINARY,'Unable':MatchStatus.UNABLE}
@@ -36,6 +36,8 @@ def filter_matches(evaluated, condition='Any', length_filter='Any', major_type='
         if status!='All' and res.status != status_map.get(status): continue
         if condition!='Any' and rv.get('condition')!=condition: continue
         if major_type!='Any' and rv.get('major_type')!=major_type: continue
+        if rv_style!='Any' and rv.get('rv_style')!=rv_style: continue
+        if floorplan!='Any' and rv.get('floorplan')!=floorplan: continue
         if brand!='Any' and (rv.get('manufacturer') or '')!=brand: continue
         if not length_filter_matches(rv,length_filter): continue
         if q:
@@ -72,6 +74,17 @@ def apply_scope(evaluated, scope, lot=None):
     if scope=='This Lot': return [x for x in evaluated if x[0].get('location')==lot and x[0].get('inventory_status')=='On Lot']
     if scope=='All Dealer Locations': return [x for x in evaluated if x[0].get('inventory_status')=='On Lot']
     return list(evaluated)
+
+def available_rv_styles(inventory, category):
+    preferred={'Travel Trailer':['Conventional Travel Trailer','A-Frame / Folding / Pop Up','Teardrop','Toy Hauler'],
+               'Fifth Wheel':['Conventional Fifth Wheel','Toy Hauler'],
+               'Truck Camper':['Hard-Side','Pop-Up']}.get(category,[])
+    return ['Any']+preferred
+
+def available_floorplans(inventory, category):
+    if category not in ('Travel Trailer','Fifth Wheel'):
+        return ['Any']
+    return ['Any','Bunkhouse','Rear Living','Rear Kitchen','Front Kitchen','Front Living','Mid-Bunk','Couples / Non-Bunkhouse']
 
 def available_major_types(inventory, category):
     preferred={'Travel Trailer':['Bunkhouse','Toy Hauler','Rear Living','Rear Kitchen','Front Kitchen','Front Living','Mid-Bunk','Couples / Non-Bunkhouse'],

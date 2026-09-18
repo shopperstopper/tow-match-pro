@@ -4,7 +4,7 @@ import streamlit as st
 
 from tow_match.models import MatchStatus
 from interface_logic import (load_inventory, evaluate_inventory, filter_matches, search_specific_unit, apply_scope,
-                             available_lots, available_major_types, available_brands, sort_matches)
+                             available_lots, available_major_types, available_brands, sort_matches, available_rv_styles, available_floorplans)
 from vehicle_data.models import VehicleAcquisitionInput
 from vehicle_data.acquisition import acquire_vehicle, to_engine_vehicle_state
 from vehicle_data.nhtsa_vpic import NHTSAVpicClient
@@ -32,6 +32,8 @@ def init_state():
         defaults[f'length_{slug}']='Any'
         defaults[f'brand_{slug}']='Any'
         defaults[f'major_type_{slug}']='Any'
+        defaults[f'rv_style_{slug}']='Any'
+        defaults[f'floorplan_{slug}']='Any'
         defaults[f'search_{slug}']=''
         defaults[f'status_{slug}']='All'
         defaults[f'sort_{slug}']='Recommended'
@@ -221,16 +223,18 @@ def main():
         if st.button(f'Unable  ·  {base_counts[MatchStatus.UNABLE]}',key=f'tile_unable_{slug}',use_container_width=True): st.session_state[status_key]='Unable'; st.rerun()
 
     st.markdown('#### Filter & Sort Tow Matches')
-    c1,c2,c3,c4,c5=st.columns(5)
+    c1,c2,c3=st.columns(3)
     with c1: condition=st.selectbox('Condition',['Any','New','Used'],key=f'condition_{slug}')
-    with c2: major_type=st.selectbox('Type / Floorplan',available_major_types(inventory,category),key=f'major_type_{slug}')
-    with c3: length=st.selectbox('Length',['Any','Under 20 ft','20–25 ft','25–30 ft','30–35 ft','35+ ft'],key=f'length_{slug}')
+    with c2: rv_style=st.selectbox('RV Style',available_rv_styles(inventory,category),key=f'rv_style_{slug}')
+    with c3: floorplan=st.selectbox('Floorplan',available_floorplans(inventory,category),key=f'floorplan_{slug}',disabled=(category=='Truck Camper'))
+    c4,c5,c6=st.columns(3)
+    with c4: length=st.selectbox('Length',['Any','Under 20 ft','20–25 ft','25–30 ft','30–35 ft','35+ ft'],key=f'length_{slug}')
     brands=available_brands(qualified_scope)
     if st.session_state.get(f'brand_{slug}') not in brands: st.session_state[f'brand_{slug}']='Any'
-    with c4: brand=st.selectbox('Brand',brands,key=f'brand_{slug}')
-    with c5: sort_by=st.selectbox('Sort',['Recommended','Heaviest first','Lightest first','Longest first','Shortest first','Price low to high','Price high to low'],key=f'sort_{slug}')
+    with c5: brand=st.selectbox('Brand',brands,key=f'brand_{slug}')
+    with c6: sort_by=st.selectbox('Sort',['Recommended','Heaviest first','Lightest first','Longest first','Shortest first','Price low to high','Price high to low'],key=f'sort_{slug}')
 
-    shown=filter_matches(qualified_scope,condition,length,major_type,brand,status=st.session_state.get(status_key,'All'))
+    shown=filter_matches(qualified_scope,condition,length,'Any',brand,status=st.session_state.get(status_key,'All'),rv_style=rv_style,floorplan=floorplan)
     st.caption(f'**{len(shown)} of {base_total} Tow Matches shown** after filters.' if len(shown)!=base_total else f'**All {base_total} Tow Matches shown.**')
 
     search=st.text_input('Specific Unit Search',placeholder='Stock number / model / manufacturer',key=f'search_{slug}')
