@@ -97,14 +97,14 @@ def main():
 
     with st.expander('1 · Tow Vehicle',expanded=not st.session_state.vehicle_ready):
         if not st.session_state.vehicle_ready:
-            st.caption('Start with the yellow-label payload. Type the VIN if available. Tow rating may be left blank.')
+            st.caption('Fastest start: enter or paste the VIN. If the VIN is unavailable, enter the yellow-label payload. Tow ratings may be left blank.')
             c1,c2,c3=st.columns(3)
             with c1:
                 st.text_input('VIN (optional)',key='vin',placeholder='17-character VIN')
                 with st.popover('📷 Open camera'):
                     vin_photo=st.camera_input('Photograph VIN / vehicle label',key='vin_camera')
                     if vin_photo is not None: st.caption('Photo captured. For this pilot, read/type the 17-character VIN above; automatic VIN text extraction is not yet enabled.')
-                st.number_input('Yellow-label payload (lb)',min_value=0,step=1,value=None,key='payload',placeholder='Required for useful matching')
+                st.number_input('Yellow-label payload (lb, if available)',min_value=0,step=1,value=None,key='payload',placeholder='Optional — improves/finalizes payload qualification')
             with c2:
                 st.number_input('Conventional tow rating (lb, if already known)',min_value=0,step=100,value=None,key='tow_rating',placeholder='Tow Match will try to resolve it')
                 st.number_input('Fifth-wheel rating (lb, if already known)',min_value=0,step=100,value=None,key='fw_rating',placeholder='Leave blank if unknown')
@@ -116,8 +116,16 @@ def main():
             with d2: st.number_input('Truck cargo & gear (lb)',min_value=0,step=25,key='cargo')
             with d3: st.segmented_control('RV Category',CATEGORIES,key='category')
             if st.button('Find Tow Matches',type='primary',use_container_width=True):
-                if st.session_state.payload is None: st.error('Enter the yellow-label payload number to start a useful Tow Match.')
+                from vehicle_data.acquisition import normalize_vin, vin_is_valid
+                entered_vin=normalize_vin(st.session_state.vin)
+                has_payload=st.session_state.payload is not None
+                if not entered_vin and not has_payload:
+                    st.error('Enter or paste the VIN, or enter the yellow-label payload.')
+                elif entered_vin and not vin_is_valid(entered_vin) and not has_payload:
+                    st.error('That VIN could not be validated. Check the VIN, or enter the yellow-label payload to continue without it.')
                 else:
+                    # Store the normalized VIN so pasted "VIN: ..." values work everywhere downstream.
+                    if entered_vin and vin_is_valid(entered_vin): st.session_state.vin=entered_vin
                     _,result,_=acquire_for_category(st.session_state.category,live_lookup=True)
                     st.session_state.acquisition=result; st.session_state.vehicle_ready=True
                     st.session_state.matched_category=st.session_state.category; st.session_state.verify_target=None
@@ -127,7 +135,7 @@ def main():
             st.write(f"VIN: **{st.session_state.vin or 'Not entered'}**")
 
     if not st.session_state.vehicle_ready:
-        st.info('Enter the yellow-label payload and press **Find Tow Matches**. VIN and tow rating can be unknown.')
+        st.info('Enter or paste the **VIN** and press **Find Tow Matches**. If no VIN is available, the yellow-label payload can start a Tow Match by itself.')
         return
 
     category=st.session_state.matched_category or st.session_state.category or 'Travel Trailer'
@@ -187,6 +195,13 @@ def main():
                     st.session_state.edit_vehicle_open=False
                     st.rerun()
     for warning in (prior.warnings if prior else []): st.caption('Vehicle note: '+warning)
+    preliminary_needs=[]
+    if vehicle.payload_lb is None: preliminary_needs.append('yellow-label payload')
+    active_rating=vehicle.fifth_wheel_tow_rating_lb if category=='Fifth Wheel' else vehicle.tow_rating_lb
+    if category in ('Travel Trailer','Fifth Wheel') and active_rating is None:
+        preliminary_needs.append('vehicle-specific '+('fifth-wheel tow rating' if category=='Fifth Wheel' else 'conventional tow rating'))
+    if preliminary_needs:
+        st.info('Tow Match is showing **preliminary Verify results now**. To finalize more matches, add '+ ' and '.join(preliminary_needs) +' when available — you do not need them to start.')
 
     selected_category=st.segmented_control('RV Category',CATEGORIES,key='category') or category
     if selected_category != category:
