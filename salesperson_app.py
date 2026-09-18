@@ -124,8 +124,8 @@ def main():
                 elif entered_vin and not vin_is_valid(entered_vin) and not has_payload:
                     st.error('That VIN could not be validated. Check the VIN, or enter the yellow-label payload to continue without it.')
                 else:
-                    # Store the normalized VIN so pasted "VIN: ..." values work everywhere downstream.
-                    if entered_vin and vin_is_valid(entered_vin): st.session_state.vin=entered_vin
+                    # Do not mutate the VIN widget's session-state value after Streamlit instantiates it.
+                    # acquire_vehicle() normalizes/extracts pasted values such as 'VIN: 1FT...' downstream.
                     _,result,_=acquire_for_category(st.session_state.category,live_lookup=True)
                     st.session_state.acquisition=result; st.session_state.vehicle_ready=True
                     st.session_state.matched_category=st.session_state.category; st.session_state.verify_target=None
