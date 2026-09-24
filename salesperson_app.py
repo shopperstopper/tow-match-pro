@@ -97,8 +97,8 @@ def main():
 
     with st.expander('1 · Tow Vehicle',expanded=not st.session_state.vehicle_ready):
         if not st.session_state.vehicle_ready:
-            st.caption('Fastest start: enter or paste the VIN. If the VIN is unavailable, enter the yellow-label payload. Tow ratings may be left blank.')
-            c1,c2,c3=st.columns(3)
+            st.caption('Enter or paste the VIN and the yellow-label payload when available. Tow Match will resolve what it can automatically.')
+            c1,c2=st.columns(2)
             with c1:
                 st.text_input('VIN (optional)',key='vin',placeholder='17-character VIN')
                 with st.popover('📷 Open camera'):
@@ -106,9 +106,6 @@ def main():
                     if vin_photo is not None: st.caption('Photo captured. For this pilot, read/type the 17-character VIN above; automatic VIN text extraction is not yet enabled.')
                 st.number_input('Yellow-label payload (lb, if available)',min_value=0,step=1,value=None,key='payload',placeholder='Optional — improves/finalizes payload qualification')
             with c2:
-                st.number_input('Conventional tow rating (lb, if already known)',min_value=0,step=100,value=None,key='tow_rating',placeholder='Tow Match will try to resolve it')
-                st.number_input('Fifth-wheel rating (lb, if already known)',min_value=0,step=100,value=None,key='fw_rating',placeholder='Leave blank if unknown')
-            with c3:
                 st.number_input('Adults 13+',min_value=0,max_value=10,step=1,key='adults')
                 st.number_input('Children 2–12',min_value=0,max_value=10,step=1,key='children')
             d1,d2,d3=st.columns(3)
@@ -201,7 +198,7 @@ def main():
     if category in ('Travel Trailer','Fifth Wheel') and active_rating is None:
         preliminary_needs.append('vehicle-specific '+('fifth-wheel tow rating' if category=='Fifth Wheel' else 'conventional tow rating'))
     if preliminary_needs:
-        st.info('Tow Match is showing **preliminary Verify results now**. To finalize more matches, add '+ ' and '.join(preliminary_needs) +' when available — you do not need them to start.')
+        st.info('**Preliminary matches — verify payload and tow rating when available.**')
 
     selected_category=st.segmented_control('RV Category',CATEGORIES,key='category') or category
     if selected_category != category:
