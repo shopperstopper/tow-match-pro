@@ -5,7 +5,10 @@ import base64
 
 import streamlit as st
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-import pytesseract
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
 try:
     from streamlit_back_camera_input import back_camera_input
 except ImportError:
@@ -29,8 +32,14 @@ VIN_PATTERN = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
 
 def extract_vin_from_photo(photo) -> str | None:
     """Best-effort local OCR for a VIN/vehicle-label photo. No external data service."""
-    if photo is None:
+    if photo is None or pytesseract is None:
         return None
+
+    # Streamlit Community Cloud installs the Tesseract binary from root packages.txt.
+    # Use its standard Debian path explicitly when present so OCR is deployment-stable.
+    from pathlib import Path
+    if Path("/usr/bin/tesseract").exists():
+        pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
     try:
         if isinstance(photo, Image.Image):
             image = photo.convert("RGB")
@@ -177,7 +186,11 @@ def main():
                     else:
                         vin_photo=st.camera_input('VIN / vehicle label',key='vin_camera',help='Fill the frame with the VIN text when possible.',resolution='1080p')
                     if vin_photo is not None:
-                        extracted_vin=extract_vin_from_photo(vin_photo)
+                        if pytesseract is None:
+                            st.error('VIN reader is not installed in this deployment. Reboot the app after deploying Build 23A requirements.txt and packages.txt.')
+                            extracted_vin=None
+                        else:
+                            extracted_vin=extract_vin_from_photo(vin_photo)
                         if extracted_vin:
                             st.session_state.pending_scanned_vin=extracted_vin
                             st.success(f'VIN read: {extracted_vin}')
