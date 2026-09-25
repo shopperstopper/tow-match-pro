@@ -96,6 +96,7 @@ def init_state():
         'acquisition':None,'verify_target':None,'matched_category':None,
         'edit_people_open':False,'edit_vehicle_open':False,
         'edit_payload':None,'edit_tow_rating':None,'edit_fw_rating':None,
+        'vin_camera_open':False,'vin_scan_message':None,
     }
     for cat in CATEGORIES:
         slug=cat.lower().replace(' ','_')
@@ -179,27 +180,51 @@ def main():
             c1,c2=st.columns(2)
             with c1:
                 st.text_input('VIN',key='vin',placeholder='17-character VIN')
-                with st.popover('📷 Scan VIN'):
-                    st.caption('Photograph the VIN or vehicle label. The phone scanner opens the rear-facing camera.')
+                if not st.session_state.vin_camera_open:
+                    if st.button('📷 Scan VIN',key='open_vin_camera'):
+                        st.session_state.vin_camera_open=True
+                        st.session_state.vin_scan_message=None
+                        st.rerun()
+                else:
+                    st.markdown('**VIN camera**')
+                    st.caption('Rear camera is open. Fill the frame with the VIN text or vehicle label.')
+                    if st.button('✕ Close Camera',key='close_vin_camera_top',use_container_width=True):
+                        st.session_state.vin_camera_open=False
+                        st.session_state.vin_scan_message=None
+                        st.rerun()
+                    st.info('**TAKE VIN PHOTO — tap the camera image below.**')
                     if back_camera_input is not None:
                         vin_photo=back_camera_input()
                     else:
-                        vin_photo=st.camera_input('VIN / vehicle label',key='vin_camera',help='Fill the frame with the VIN text when possible.',resolution='1080p')
+                        st.caption('Rear-camera component is unavailable. Use the camera control below and switch to the rear camera if needed.')
+                        vin_photo=st.camera_input('Take VIN Photo',key='vin_camera',help='Fill the frame with the VIN text when possible.',resolution='1080p')
                     if vin_photo is not None:
                         if pytesseract is None:
-                            st.error('VIN reader is not installed in this deployment. Reboot the app after deploying Build 23A requirements.txt and packages.txt.')
+                            st.error('VIN reader is not installed in this deployment. Reboot the app after deploying requirements.txt and packages.txt.')
                             extracted_vin=None
                         else:
-                            extracted_vin=extract_vin_from_photo(vin_photo)
+                            with st.spinner('Reading VIN…'):
+                                extracted_vin=extract_vin_from_photo(vin_photo)
                         if extracted_vin:
-                            st.session_state.pending_scanned_vin=extracted_vin
-                            st.success(f'VIN read: {extracted_vin}')
-                            if st.button('Use scanned VIN',type='primary',use_container_width=True):
-                                st.session_state.apply_scanned_vin=extracted_vin
-                                st.session_state.pop('pending_scanned_vin',None)
-                                st.rerun()
+                            st.session_state.apply_scanned_vin=extracted_vin
+                            st.session_state.vin_camera_open=False
+                            st.session_state.vin_scan_message=f'VIN read: {extracted_vin}'
+                            st.rerun()
                         else:
-                            st.warning('VIN not read clearly. Move closer, keep the label square to the camera, and retake the photo.')
+                            st.warning("VIN wasn't recognized. Retake the photo or enter the VIN manually.")
+                            r1,r2=st.columns(2)
+                            with r1:
+                                if st.button('↻ Retake Photo',key='retake_vin_photo',use_container_width=True):
+                                    st.session_state.vin_scan_message=None
+                                    st.rerun()
+                            with r2:
+                                if st.button('✕ Close Camera',key='close_vin_camera_bottom',use_container_width=True):
+                                    st.session_state.vin_camera_open=False
+                                    st.session_state.vin_scan_message=None
+                                    st.rerun()
+                if st.session_state.get('vin_scan_message'):
+                    st.success(st.session_state.vin_scan_message)
+                    st.session_state.vin_scan_message=None
                 st.caption('Enter the payload from the yellow door label.')
                 st.number_input('Yellow-label payload (lb)',min_value=0,step=1,value=None,key='payload',placeholder='Payload shown on door label')
             with c2:
