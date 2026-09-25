@@ -21,6 +21,29 @@ KNOWN_VEHICLES = {
         },
         'detail': 'Verified Tow Match pilot vehicle configuration; Ford capability remains manufacturer-resolved',
     },
+    # 2026 F-250 Tow Match regression vehicle. Configuration and category-specific ratings
+    # were verified from the vehicle-specific dealer/OEM technical record supplied during pilot development.
+    # This cache proves the VIN -> verified capability path; it is not a generic VIN inference rule.
+    '1FT7W2BT7TEF56538': {
+        'identity': {
+            'year': 2026, 'make': 'FORD', 'model': 'F-250', 'trim': 'XL',
+            'drive_type': '4WD/4-Wheel Drive', 'engine': '6.7L Power Stroke diesel',
+            'bed_length_in': 98.1,
+        },
+        'ford_config': {
+            'axle_ratio': 3.73,
+            'drive': '4x4',
+            'engine': '6.7 DIESEL',
+            'cab': 'CREW',
+            'wheelbase_in': 176.0,
+            'box_length_ft': 8.175,
+        },
+        'capability': {
+            'tow_rating_lb': 13800,
+            'fifth_wheel_tow_rating_lb': 13600,
+        },
+        'detail': 'Verified vehicle-specific Tow Match pilot record',
+    },
 }
 
 def get_known_vehicle(vin):

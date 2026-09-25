@@ -78,6 +78,14 @@ def acquire_vehicle(inp: VehicleAcquisitionInput, vpic_client=None, manufacturer
                     out.warnings.append('VIN lookup unavailable. Continue with label/manual data; VIN lookup can be retried later.')
         else:
             out.warnings.append('VIN is not a valid 17-character VIN. Tow Match can continue without VIN.')
+    # A verified VIN-specific capability cache may fill exact category ratings without
+    # salesperson entry. These are previously verified facts for that VIN, never VIN-pattern guesses.
+    if known:
+        for name,val in known.get('capability',{}).items():
+            if val is not None:
+                out.facts[name]=VehicleFact(float(val),DataSource.MANUFACTURER,
+                    detail=known.get('detail','Verified VIN-specific capability record'))
+
     if inp.payload_label_lb is not None:
         out.facts['payload_lb']=VehicleFact(float(inp.payload_label_lb),DataSource.VEHICLE_LABEL,detail='Tire and Loading placard occupant/cargo capacity')
     elif inp.gm_label_max_payload_lb is not None:
