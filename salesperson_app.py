@@ -1,6 +1,15 @@
 from __future__ import annotations
 import re
+from io import BytesIO
+import base64
+
 import streamlit as st
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+import pytesseract
+try:
+    from streamlit_back_camera_input import back_camera_input
+except ImportError:
+    back_camera_input = None
 
 from tow_match.models import MatchStatus
 from interface_logic import (load_inventory, evaluate_inventory, filter_matches, search_specific_unit, apply_scope,
@@ -14,6 +23,60 @@ from dealer_config import DEALER_NAME, HOME_LOT
 APP_TITLE='Tow Match Pro'
 CATEGORIES=['Travel Trailer','Fifth Wheel','Truck Camper']
 SCOPES=['This Lot','All Dealer Locations','Pipeline']
+
+
+VIN_PATTERN = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
+
+def extract_vin_from_photo(photo) -> str | None:
+    """Best-effort local OCR for a VIN/vehicle-label photo. No external data service."""
+    if photo is None:
+        return None
+    try:
+        if isinstance(photo, Image.Image):
+            image = photo.convert("RGB")
+        elif isinstance(photo, str):
+            raw = photo.split(",", 1)[1] if photo.startswith("data:") and "," in photo else photo
+            photo = BytesIO(base64.b64decode(raw))
+        elif isinstance(photo, (bytes, bytearray)):
+            photo = BytesIO(photo)
+        if not isinstance(photo, Image.Image):
+            image = Image.open(photo).convert("RGB")
+    except Exception:
+        return None
+
+    # Tesseract is intentionally local: the VIN-label image is not sent to a third-party OCR API.
+    # Upscaling and contrast/sharpening materially improve small door-label text on phone photos.
+    max_side = max(image.size)
+    if max_side < 2200:
+        scale = min(3.0, 2200 / max_side)
+        image = image.resize((int(image.width * scale), int(image.height * scale)))
+    gray = ImageOps.grayscale(image)
+    gray = ImageEnhance.Contrast(gray).enhance(2.0).filter(ImageFilter.SHARPEN)
+    variants = [gray, gray.point(lambda x: 255 if x > 155 else 0)]
+
+    from vehicle_data.acquisition import vin_is_valid
+    candidates = []
+    for variant in variants:
+        for psm in (6, 11):
+            try:
+                text = pytesseract.image_to_string(variant, config=f"--psm {psm}").upper()
+            except Exception:
+                continue
+            compact_lines = [re.sub(r"[^A-Z0-9]", "", line) for line in text.splitlines()]
+            for line in compact_lines:
+                candidates.extend(VIN_PATTERN.findall(line))
+                # OCR often inserts/removes punctuation or spaces around the printed VIN.
+                for i in range(max(0, len(line) - 16)):
+                    chunk = line[i:i+17]
+                    if len(chunk) == 17 and all(c not in "IOQ" for c in chunk):
+                        candidates.append(chunk)
+    seen=set()
+    for candidate in candidates:
+        if candidate not in seen:
+            seen.add(candidate)
+            if vin_is_valid(candidate):
+                return candidate
+    return None
 
 
 def init_state():
@@ -92,20 +155,40 @@ def main():
     </style>''',unsafe_allow_html=True)
 
     a,b=st.columns([6,1])
-    with a: st.title('Tow Match Pro'); st.caption(f'{DEALER_NAME} · Salesperson Pilot · Home lot: {HOME_LOT}')
+    with a: st.title('Tow Match Pro')
     with b:
         if st.button('New Tow Match',use_container_width=True): reset()
 
     with st.expander('1 · Tow Vehicle',expanded=not st.session_state.vehicle_ready):
         if not st.session_state.vehicle_ready:
-            st.caption('Enter or paste the VIN and the yellow-label payload when available. Tow Match will resolve what it can automatically.')
+            # Apply a scanned VIN before the VIN widget is instantiated on this rerun.
+            # This avoids Streamlit's widget-state mutation error.
+            if st.session_state.get('apply_scanned_vin'):
+                st.session_state.vin=st.session_state.pop('apply_scanned_vin')
+                st.session_state.pop('vin_camera',None)
+            st.caption('Scan or enter the VIN to identify the tow vehicle.')
             c1,c2=st.columns(2)
             with c1:
-                st.text_input('VIN (optional)',key='vin',placeholder='17-character VIN')
-                with st.popover('📷 Open camera'):
-                    vin_photo=st.camera_input('Photograph VIN / vehicle label',key='vin_camera')
-                    if vin_photo is not None: st.caption('Photo captured. For this pilot, read/type the 17-character VIN above; automatic VIN text extraction is not yet enabled.')
-                st.number_input('Yellow-label payload (lb, if available)',min_value=0,step=1,value=None,key='payload',placeholder='Optional — improves/finalizes payload qualification')
+                st.text_input('VIN',key='vin',placeholder='17-character VIN')
+                with st.popover('📷 Scan VIN'):
+                    st.caption('Photograph the VIN or vehicle label. The phone scanner opens the rear-facing camera.')
+                    if back_camera_input is not None:
+                        vin_photo=back_camera_input()
+                    else:
+                        vin_photo=st.camera_input('VIN / vehicle label',key='vin_camera',help='Fill the frame with the VIN text when possible.',resolution='1080p')
+                    if vin_photo is not None:
+                        extracted_vin=extract_vin_from_photo(vin_photo)
+                        if extracted_vin:
+                            st.session_state.pending_scanned_vin=extracted_vin
+                            st.success(f'VIN read: {extracted_vin}')
+                            if st.button('Use scanned VIN',type='primary',use_container_width=True):
+                                st.session_state.apply_scanned_vin=extracted_vin
+                                st.session_state.pop('pending_scanned_vin',None)
+                                st.rerun()
+                        else:
+                            st.warning('VIN not read clearly. Move closer, keep the label square to the camera, and retake the photo.')
+                st.caption('Enter the payload from the yellow door label.')
+                st.number_input('Yellow-label payload (lb)',min_value=0,step=1,value=None,key='payload',placeholder='Payload shown on door label')
             with c2:
                 st.number_input('Adults 13+',min_value=0,max_value=10,step=1,key='adults')
                 st.number_input('Children 2–12',min_value=0,max_value=10,step=1,key='children')
@@ -133,7 +216,7 @@ def main():
             st.write(f"VIN: **{st.session_state.vin or 'Not entered'}**")
 
     if not st.session_state.vehicle_ready:
-        st.info('Enter or paste the **VIN** and press **Find Tow Matches**. If no VIN is available, the yellow-label payload can start a Tow Match by itself.')
+        st.info('**Scan or enter the VIN to identify the tow vehicle.** Add the payload from the yellow door label to finalize payload qualification.')
         return
 
     category=st.session_state.matched_category or st.session_state.category or 'Travel Trailer'
