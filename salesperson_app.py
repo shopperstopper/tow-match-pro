@@ -395,12 +395,20 @@ def main():
 
     for rv,res in shown:
         unit_key=re.sub(r'\W+','_',rv['source_url'] or rv['display_title'])[-100:]
+        # Re-evaluate the displayed unit against the CURRENT effective vehicle state.
+        # This keeps Why This Matches synchronized after Correct Vehicle Data edits.
+        refreshed = evaluate_inventory([rv], vehicle, category)
+        if refreshed:
+            _, res = refreshed[0]
         with st.container(border=True):
             left,mid,right=st.columns([1.3,4.8,1.5])
             with left:
                 if rv['image_url'] and rv['image_url']!='nan': st.image(rv['image_url'],use_container_width=True)
             with mid:
-                st.markdown(f"### {rv['display_title']}")
+                stock = str(rv.get('stock_number') or '').strip()
+                if stock.lower() == 'nan': stock = ''
+                title = f"Stock # {stock} · {rv['display_title']}" if stock else rv['display_title']
+                st.markdown(f"### {title}")
                 bits=[rv['rv_category'],f"{rv['overall_length_ft']:.1f} ft" if rv['overall_length_ft'] else None,rv['condition'],rv['location'],rv['inventory_status']]
                 st.write(' · '.join(x for x in bits if x))
                 facts=[]
