@@ -23,6 +23,7 @@ def init_state():
         'adults':2,'children':0,'pets':0.0,'cargo':150.0,'category':'Travel Trailer',
         'acquisition':None,'verify_target':None,'matched_category':None,
         'edit_people_open':False,'edit_vehicle_open':False,
+        'edit_payload':None,'edit_tow_rating':None,'edit_fw_rating':None,
     }
     for cat in CATEGORIES:
         slug=cat.lower().replace(' ','_')
@@ -157,8 +158,15 @@ def main():
             st.session_state.edit_vehicle_open=False
     with e2:
         if st.button('Correct Vehicle Data',use_container_width=True):
-            st.session_state.edit_vehicle_open=not st.session_state.edit_vehicle_open
+            opening=not st.session_state.edit_vehicle_open
+            st.session_state.edit_vehicle_open=opening
             st.session_state.edit_people_open=False
+            if opening:
+                # Always seed the correction form from the CURRENT effective vehicle facts.
+                # Streamlit otherwise preserves stale widget state from an earlier opening.
+                st.session_state.edit_payload=int(round(vehicle.payload_lb)) if vehicle.payload_lb is not None else None
+                st.session_state.edit_tow_rating=int(round(vehicle.tow_rating_lb)) if vehicle.tow_rating_lb is not None else None
+                st.session_state.edit_fw_rating=int(round(vehicle.fifth_wheel_tow_rating_lb)) if vehicle.fifth_wheel_tow_rating_lb is not None else None
 
     if st.session_state.edit_people_open:
         with st.container(border=True):
@@ -182,9 +190,9 @@ def main():
             st.caption('Current effective values are shown below. Leave an unknown rating blank.')
             with st.form('correct_vehicle_data'):
                 vc1,vc2,vc3=st.columns(3)
-                with vc1: payload=st.number_input('Yellow-label payload (lb)',min_value=0,value=int(round(vehicle.payload_lb)) if vehicle.payload_lb is not None else None,step=1,placeholder='Unknown')
-                with vc2: tow=st.number_input('Conventional tow rating (lb)',min_value=0,value=int(round(vehicle.tow_rating_lb)) if vehicle.tow_rating_lb is not None else None,step=100,placeholder='Unknown')
-                with vc3: fw=st.number_input('Fifth-wheel rating (lb)',min_value=0,value=int(round(vehicle.fifth_wheel_tow_rating_lb)) if vehicle.fifth_wheel_tow_rating_lb is not None else None,step=100,placeholder='Unknown')
+                with vc1: payload=st.number_input('Yellow-label payload (lb)',min_value=0,step=1,placeholder='Unknown',key='edit_payload')
+                with vc2: tow=st.number_input('Conventional tow rating (lb)',min_value=0,step=100,placeholder='Unknown',key='edit_tow_rating')
+                with vc3: fw=st.number_input('Fifth-wheel rating (lb)',min_value=0,step=100,placeholder='Unknown',key='edit_fw_rating')
                 if st.form_submit_button('Correct & Recalculate',type='primary'):
                     st.session_state.payload=payload
                     st.session_state.tow_rating=tow
