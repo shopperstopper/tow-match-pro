@@ -30,118 +30,134 @@ SCOPES=['This Lot','All Dealer Locations','Pipeline']
 
 VIN_PATTERN = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
 
-def extract_vin_from_photo(photo) -> str | None:
-    """Local VIN OCR with conservative candidate voting. False positives are rejected."""
-    if photo is None or pytesseract is None:
-        return None
+try:
+    from pyzbar.pyzbar import decode as decode_barcode
+except Exception:
+    decode_barcode = None
 
-    from pathlib import Path
-    from collections import Counter
-    if Path("/usr/bin/tesseract").exists():
-        pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+
+def _photo_to_image(photo) -> Image.Image | None:
     try:
         if isinstance(photo, Image.Image):
-            image = photo.convert("RGB")
-        elif isinstance(photo, str):
+            return photo.convert("RGB")
+        if isinstance(photo, str):
             raw = photo.split(",", 1)[1] if photo.startswith("data:") and "," in photo else photo
             photo = BytesIO(base64.b64decode(raw))
         elif isinstance(photo, (bytes, bytearray)):
             photo = BytesIO(photo)
-        if not isinstance(photo, Image.Image):
-            image = Image.open(photo).convert("RGB")
+        return Image.open(photo).convert("RGB")
     except Exception:
         return None
 
+
+def _valid_vin_from_barcode_text(raw: str) -> str | None:
+    """J1877 uses Code 39 and may prefix the 17-character VIN with data identifier I."""
     from vehicle_data.acquisition import vin_is_valid
-    votes = Counter()
-    vin_label_votes = Counter()
+    text = re.sub(r"[^A-Z0-9*]", "", (raw or "").upper()).strip("*")
+    candidates = []
+    if len(text) == 18 and text.startswith("I"):
+        candidates.append(text[1:])
+    if len(text) == 17:
+        candidates.append(text)
+    # Some readers return framing/data characters around the payload. Never guess: only
+    # accept a unique checksum-valid 17-character window.
+    for i in range(max(0, len(text) - 16)):
+        candidates.append(text[i:i+17])
+    valid = []
+    for c in candidates:
+        if VIN_PATTERN.fullmatch(c) and vin_is_valid(c) and c not in valid:
+            valid.append(c)
+    return valid[0] if len(valid) == 1 else None
 
-    def candidates_from_text(text: str):
-        """Return checksum-valid VINs, tracking candidates explicitly associated with a VIN label."""
-        text = text.upper()
+
+def extract_vin_from_barcode(image: Image.Image) -> str | None:
+    """Fast barcode-first path. A failed decode falls through; it never fabricates a VIN."""
+    if decode_barcode is None:
+        return None
+    # Whole image first. Then broad bands because a barcode occupying more of the decoder's
+    # input is easier to read. These are cheap barcode operations, not OCR sweeps.
+    regions = [image]
+    w, h = image.size
+    regions += [
+        image.crop((0, int(.18*h), w, int(.72*h))),
+        image.crop((0, int(.28*h), w, int(.62*h))),
+    ]
+    seen = set()
+    for region in regions:
+        for angle in (0, -6, 6):
+            test = region if angle == 0 else region.rotate(angle, expand=True, fillcolor="white")
+            try:
+                results = decode_barcode(test)
+            except Exception:
+                results = []
+            for result in results:
+                try:
+                    raw = result.data.decode("ascii", errors="ignore")
+                except Exception:
+                    raw = str(result.data)
+                vin = _valid_vin_from_barcode_text(raw)
+                if vin:
+                    seen.add(vin)
+    return next(iter(seen)) if len(seen) == 1 else None
+
+
+def extract_vin_from_photo(photo) -> str | None:
+    """Build 23F: barcode first; short, VIN-line-specific OCR fallback; fast safe failure."""
+    image = _photo_to_image(photo)
+    if image is None:
+        return None
+
+    # 1) J1877 barcode path. This is the preferred acquisition method.
+    vin = extract_vin_from_barcode(image)
+    if vin:
+        return vin
+
+    # 2) Printed VIN fallback. Keep this intentionally small so the UI cannot spend a minute
+    # brute-forcing the label as 23D/23E did.
+    if pytesseract is None:
+        return None
+    from pathlib import Path
+    from vehicle_data.acquisition import vin_is_valid
+    if Path("/usr/bin/tesseract").exists():
+        pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+
+    def labeled_vins(text: str):
         found = set()
-        labeled = set()
-        raw_lines = text.splitlines()
-        for raw_line in raw_lines:
-            compact = re.sub(r"[^A-Z0-9]", "", raw_line)
-            for candidate in VIN_PATTERN.findall(compact):
-                if vin_is_valid(candidate):
-                    found.add(candidate)
-                    if re.search(r"\bV[I1L]N\b|VIN[:\s]", raw_line.upper()):
-                        labeled.add(candidate)
-            # OCR often inserts spaces/punctuation between VIN characters. Only join a line
-            # aggressively when OCR also sees a VIN label on that same line.
-            if re.search(r"\bV[I1L]N\b|VIN[:\s]", raw_line.upper()):
-                after = re.split(r"\bV[I1L]N\b|VIN", raw_line.upper(), maxsplit=1)[-1]
-                joined = re.sub(r"[^A-Z0-9]", "", after)
-                for i in range(max(0, len(joined) - 16)):
-                    candidate = joined[i:i+17]
-                    if VIN_PATTERN.fullmatch(candidate) and vin_is_valid(candidate):
-                        found.add(candidate); labeled.add(candidate)
-        return found, labeled
+        for line in text.upper().splitlines():
+            if not re.search(r"\bV[I1L]N\b|VIN[:\s]", line):
+                continue
+            compact = re.sub(r"[^A-Z0-9]", "", line)
+            # Look both in the complete line and after the VIN label.
+            chunks = [compact]
+            after = re.split(r"\bV[I1L]N\b|VIN", line, maxsplit=1)[-1]
+            chunks.append(re.sub(r"[^A-Z0-9]", "", after))
+            for chunk in chunks:
+                for i in range(max(0, len(chunk)-16)):
+                    c = chunk[i:i+17]
+                    if VIN_PATTERN.fullmatch(c) and vin_is_valid(c):
+                        found.add(c)
+        return found
 
-    def record(text: str):
-        found, labeled = candidates_from_text(text)
-        for c in found: votes[c] += 1
-        for c in labeled: vin_label_votes[c] += 1
-
-    # Whole-photo passes preserve the clean screen/Notepad case.
-    max_side = max(image.size)
-    scale = min(3.0, 2600 / max_side) if max_side < 2600 else 1.0
-    base = image.resize((int(image.width * scale), int(image.height * scale))) if scale > 1 else image
-    gray = ImageEnhance.Contrast(ImageOps.grayscale(base)).enhance(2.2).filter(ImageFilter.SHARPEN)
-    for variant in (gray, gray.point(lambda x: 255 if x > 145 else 0), gray.point(lambda x: 255 if x > 175 else 0)):
-        for psm in (6, 11, 12):
-            try: record(pytesseract.image_to_string(variant, config=f"--psm {psm}"))
-            except Exception: pass
-
-    # Real labels: deskew, then OCR overlapping bands so the VIN line is isolated from
-    # GAWR/tire text and the barcode.  Do NOT return the first 17-character coincidence.
-    rotations = (-10, -8, -6, -4, -2, 0, 2, 4, 6, 8, 10)
-    for angle in rotations:
-        rotated = image.rotate(angle, expand=True, fillcolor="white")
-        w, h = rotated.size
-        regions = [
-            rotated.crop((int(.03*w), int(.18*h), int(.99*w), int(.76*h))),
-            rotated.crop((int(.08*w), int(.28*h), int(.99*w), int(.70*h))),
-        ]
-        band_h = max(70, int(.12*h))
-        step = max(32, band_h // 2)
-        for y in range(int(.18*h), min(int(.80*h), h-band_h+1), step):
-            regions.append(rotated.crop((int(.02*w), y, int(.99*w), y+band_h)))
-        for region in regions:
-            rscale = min(5.0, 3200 / max(1, region.width))
-            if rscale > 1:
-                region = region.resize((int(region.width*rscale), int(region.height*rscale)))
-            rg = ImageOps.grayscale(region)
-            variants = [
-                ImageEnhance.Contrast(rg).enhance(2.5).filter(ImageFilter.SHARPEN),
-                rg.point(lambda x: 255 if x > 135 else 0),
-                rg.point(lambda x: 255 if x > 160 else 0),
-                rg.point(lambda x: 255 if x > 185 else 0),
-            ]
-            for variant in variants:
-                for psm in (6, 7, 11, 12, 13):
-                    try:
-                        record(pytesseract.image_to_string(
-                            variant,
-                            config=f"--psm {psm} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:",
-                        ))
-                    except Exception:
-                        pass
-
-    # Acceptance policy: a VIN explicitly tied to an OCR'd VIN label wins. Otherwise the
-    # exact same checksum-valid 17-character VIN must be independently seen at least twice.
-    # This is intentionally conservative: no read is safer than silently selecting a wrong vehicle.
-    if vin_label_votes:
-        candidate, count = vin_label_votes.most_common(1)[0]
-        if count >= 1:
-            return candidate
-    if votes:
-        candidate, count = votes.most_common(1)[0]
-        if count >= 2:
-            return candidate
-    return None
+    # Whole image plus three horizontal bands, two OCR modes = at most eight OCR calls.
+    # No rotations, threshold grids, or dozens of crops.
+    w, h = image.size
+    regions = [image]
+    for y0, y1 in ((.25,.55), (.35,.65), (.45,.75)):
+        regions.append(image.crop((0, int(y0*h), w, int(y1*h))))
+    found = set()
+    for region in regions:
+        scale = min(3.0, 2400 / max(1, region.width))
+        if scale > 1:
+            region = region.resize((int(region.width*scale), int(region.height*scale)))
+        gray = ImageEnhance.Contrast(ImageOps.grayscale(region)).enhance(2.2).filter(ImageFilter.SHARPEN)
+        for psm in (6, 11):
+            try:
+                text = pytesseract.image_to_string(
+                    gray, config=f"--psm {psm} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:")
+                found.update(labeled_vins(text))
+            except Exception:
+                pass
+    return next(iter(found)) if len(found) == 1 else None
 
 
 def init_state():
@@ -243,17 +259,17 @@ def main():
                         st.rerun()
                 else:
                     st.markdown('**VIN camera**')
-                    st.caption('Rear camera is open. Fill the frame with the VIN text or vehicle label.')
+                    st.caption('Rear camera is open. Move close and fill most of the camera width with the long VIN barcode and the VIN line above it.')
                     if st.button('✕ Close Camera',key='close_vin_camera_top',use_container_width=True):
                         st.session_state.vin_camera_open=False
                         st.session_state.vin_scan_message=None
                         st.rerun()
-                    st.info('**TAKE VIN PHOTO — tap the camera image below.**')
+                    st.info('**SCAN VIN BARCODE — move close, keep the long barcode sharp, then tap the camera image below.**')
                     if back_camera_input is not None:
                         vin_photo=back_camera_input()
                     else:
                         st.caption('Rear-camera component is unavailable. Use the camera control below and switch to the rear camera if needed.')
-                        vin_photo=st.camera_input('Take VIN Photo',key='vin_camera',help='Fill the frame with the VIN text when possible.',resolution='1080p')
+                        vin_photo=st.camera_input('Take VIN Photo',key='vin_camera',help='Move close enough that the VIN barcode fills most of the camera width.',resolution='1080p')
                     if vin_photo is not None:
                         if pytesseract is None:
                             st.error('VIN reader is not installed in this deployment. Reboot the app after deploying requirements.txt and packages.txt.')
