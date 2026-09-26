@@ -302,11 +302,15 @@ def main():
                         st.session_state.vin_scan_message=None
                         st.rerun()
                     st.info('**SCAN VEHICLE LABEL — point the camera at the certification label and take the photo.**')
-                    if back_camera_input is not None:
-                        vin_photo=back_camera_input()
-                    else:
-                        st.caption('Rear-camera component is unavailable. Use the camera control below and switch to the rear camera if needed.')
-                        vin_photo=st.camera_input('Take VIN Photo',key='vin_camera',help='Photograph the vehicle certification label with the VIN area reasonably clear.',resolution='1080p')
+                    # Build 23H: use Streamlit's native high-resolution capture.
+                    # The old 2022 rear-camera component rasterized the frame into a
+                    # display-sized canvas before returning it, throwing away VIN detail.
+                    vin_photo=st.camera_input(
+                        'Take VIN Photo',
+                        key='vin_camera',
+                        help='Photograph the vehicle certification label.',
+                        resolution='1080p',
+                    )
                     if vin_photo is not None:
                         if pytesseract is None:
                             st.error('VIN reader is not installed in this deployment. Reboot the app after deploying requirements.txt and packages.txt.')
@@ -320,6 +324,11 @@ def main():
                             st.session_state.vin_scan_message=f'VIN read: {extracted_vin}'
                             st.rerun()
                         else:
+                            # Diagnostic is intentionally visible only on failure. It tells us
+                            # what resolution the browser actually delivered; 1080p is a request.
+                            received = _photo_to_image(vin_photo)
+                            if received is not None:
+                                st.caption(f"Camera image received: {received.width} × {received.height} pixels")
                             st.warning("VIN wasn't recognized. Retake the photo or enter the VIN manually.")
                             r1,r2=st.columns(2)
                             with r1:
