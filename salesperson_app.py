@@ -101,63 +101,100 @@ def extract_vin_from_barcode(image: Image.Image) -> str | None:
     return next(iter(seen)) if len(seen) == 1 else None
 
 
+def _ocr_vin_candidate_from_line(line: str) -> str | None:
+    """Extract a VIN-shaped string only from a line Tesseract itself identified as VIN."""
+    u = (line or "").upper()
+    m = re.search(r"V[I1L]N\s*[:;]?\s*(.*)", u)
+    if not m:
+        return None
+    raw = re.sub(r"[^A-Z0-9]", "", m.group(1))
+    # The VIN is the first VIN-like payload after the printed VIN label.
+    return raw[:17] if len(raw) >= 17 else None
+
+
+def _safe_repair_labeled_vin(candidates: list[str]) -> str | None:
+    """Repair only tightly constrained OCR ambiguity; never free-form guess a VIN."""
+    from vehicle_data.acquisition import vin_is_valid
+    legal = "ABCDEFGHJKLMNPRSTUVWXYZ0123456789"
+    exact = {c for c in candidates if VIN_PATTERN.fullmatch(c) and vin_is_valid(c)}
+    if len(exact) == 1:
+        return next(iter(exact))
+    if len(exact) > 1:
+        return None
+
+    # Strong consensus case: two or more labeled reads agree on positions 2-17.
+    # Door-label perspective commonly turns the leading '1' into 4/T/7. We may repair
+    # that one glyph only when the remainder is independently stable and checksum confirms it.
+    tails = {}
+    for c in candidates:
+        if len(c) == 17:
+            tails.setdefault(c[1:], []).append(c)
+    for tail, group in tails.items():
+        if len(group) >= 2:
+            repaired = "1" + tail
+            if VIN_PATTERN.fullmatch(repaired) and vin_is_valid(repaired):
+                return repaired
+
+    # A single high-quality labeled read may have one OCR glyph error. Restrict repairs to
+    # well-observed camera/OCR confusions and require a UNIQUE checksum-valid result.
+    confusion = {
+        "I": "1", "L": "1", "O": "0", "Q": "0", "Z": "2", "S": "5",
+        "G": "6", "B": "8", "T": "7", "4": "1", "7": "1",
+    }
+    repaired = set()
+    for c in candidates:
+        if len(c) != 17:
+            continue
+        for i, ch in enumerate(c):
+            for repl in confusion.get(ch, ""):
+                x = c[:i] + repl + c[i+1:]
+                if VIN_PATTERN.fullmatch(x) and vin_is_valid(x):
+                    repaired.add(x)
+    return next(iter(repaired)) if len(repaired) == 1 else None
+
+
 def extract_vin_from_photo(photo) -> str | None:
-    """Build 23F: barcode first; short, VIN-line-specific OCR fallback; fast safe failure."""
+    """Build 23G: barcode first, then fast label-aware deskewed OCR with safe validation."""
     image = _photo_to_image(photo)
     if image is None:
         return None
 
-    # 1) J1877 barcode path. This is the preferred acquisition method.
     vin = extract_vin_from_barcode(image)
     if vin:
         return vin
-
-    # 2) Printed VIN fallback. Keep this intentionally small so the UI cannot spend a minute
-    # brute-forcing the label as 23D/23E did.
     if pytesseract is None:
         return None
+
     from pathlib import Path
-    from vehicle_data.acquisition import vin_is_valid
     if Path("/usr/bin/tesseract").exists():
         pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
-    def labeled_vins(text: str):
-        found = set()
-        for line in text.upper().splitlines():
-            if not re.search(r"\bV[I1L]N\b|VIN[:\s]", line):
-                continue
-            compact = re.sub(r"[^A-Z0-9]", "", line)
-            # Look both in the complete line and after the VIN label.
-            chunks = [compact]
-            after = re.split(r"\bV[I1L]N\b|VIN", line, maxsplit=1)[-1]
-            chunks.append(re.sub(r"[^A-Z0-9]", "", after))
-            for chunk in chunks:
-                for i in range(max(0, len(chunk)-16)):
-                    c = chunk[i:i+17]
-                    if VIN_PATTERN.fullmatch(c) and vin_is_valid(c):
-                        found.add(c)
-        return found
-
-    # Whole image plus three horizontal bands, two OCR modes = at most eight OCR calls.
-    # No rotations, threshold grids, or dozens of crops.
-    w, h = image.size
-    regions = [image]
-    for y0, y1 in ((.25,.55), (.35,.65), (.45,.75)):
-        regions.append(image.crop((0, int(y0*h), w, int(y1*h))))
-    found = set()
-    for region in regions:
-        scale = min(3.0, 2400 / max(1, region.width))
+    # Real certification labels are commonly photographed at an angle. Rather than the
+    # Build 23E brute-force crop/threshold grid, use a small bounded set of deskew attempts.
+    # Stop immediately on a checksum-valid labeled VIN.
+    attempts = ((-13, 2.3), (0, 2.0), (13, 2.3), (-8, 2.1), (8, 2.1))
+    candidates = []
+    for angle, contrast in attempts:
+        work = image if angle == 0 else image.rotate(angle, expand=True, fillcolor="white")
+        scale = min(3.0, 2200 / max(1, work.width))
         if scale > 1:
-            region = region.resize((int(region.width*scale), int(region.height*scale)))
-        gray = ImageEnhance.Contrast(ImageOps.grayscale(region)).enhance(2.2).filter(ImageFilter.SHARPEN)
-        for psm in (6, 11):
-            try:
-                text = pytesseract.image_to_string(
-                    gray, config=f"--psm {psm} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:")
-                found.update(labeled_vins(text))
-            except Exception:
-                pass
-    return next(iter(found)) if len(found) == 1 else None
+            work = work.resize((int(work.width*scale), int(work.height*scale)))
+        gray = ImageEnhance.Contrast(ImageOps.grayscale(work)).enhance(contrast).filter(ImageFilter.SHARPEN)
+        try:
+            text = pytesseract.image_to_string(
+                gray,
+                config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:",
+            )
+        except Exception:
+            continue
+        for line in text.splitlines():
+            c = _ocr_vin_candidate_from_line(line)
+            if c:
+                candidates.append(c)
+        repaired = _safe_repair_labeled_vin(candidates)
+        if repaired:
+            return repaired
+    return _safe_repair_labeled_vin(candidates)
 
 
 def init_state():
@@ -259,17 +296,17 @@ def main():
                         st.rerun()
                 else:
                     st.markdown('**VIN camera**')
-                    st.caption('Rear camera is open. Move close and fill most of the camera width with the long VIN barcode and the VIN line above it.')
+                    st.caption('Rear camera is open. Photograph the vehicle certification label so the VIN area is reasonably clear.')
                     if st.button('✕ Close Camera',key='close_vin_camera_top',use_container_width=True):
                         st.session_state.vin_camera_open=False
                         st.session_state.vin_scan_message=None
                         st.rerun()
-                    st.info('**SCAN VIN BARCODE — move close, keep the long barcode sharp, then tap the camera image below.**')
+                    st.info('**SCAN VEHICLE LABEL — point the camera at the certification label and take the photo.**')
                     if back_camera_input is not None:
                         vin_photo=back_camera_input()
                     else:
                         st.caption('Rear-camera component is unavailable. Use the camera control below and switch to the rear camera if needed.')
-                        vin_photo=st.camera_input('Take VIN Photo',key='vin_camera',help='Move close enough that the VIN barcode fills most of the camera width.',resolution='1080p')
+                        vin_photo=st.camera_input('Take VIN Photo',key='vin_camera',help='Photograph the vehicle certification label with the VIN area reasonably clear.',resolution='1080p')
                     if vin_photo is not None:
                         if pytesseract is None:
                             st.error('VIN reader is not installed in this deployment. Reboot the app after deploying requirements.txt and packages.txt.')
