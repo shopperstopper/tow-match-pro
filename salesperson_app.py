@@ -9,10 +9,6 @@ try:
     import pytesseract
 except ImportError:
     pytesseract = None
-try:
-    from streamlit_back_camera_input import back_camera_input
-except ImportError:
-    back_camera_input = None
 
 from tow_match.models import MatchStatus
 from interface_logic import (load_inventory, evaluate_inventory, filter_matches, search_specific_unit, apply_scope,
@@ -112,49 +108,18 @@ def _ocr_vin_candidate_from_line(line: str) -> str | None:
     return raw[:17] if len(raw) >= 17 else None
 
 
-def _safe_repair_labeled_vin(candidates: list[str]) -> str | None:
-    """Repair only tightly constrained OCR ambiguity; never free-form guess a VIN."""
+def _strict_labeled_vin_consensus(candidates: list[str]) -> str | None:
+    """Accept OCR only when independent reads agree exactly on one valid VIN. Never repair glyphs."""
     from vehicle_data.acquisition import vin_is_valid
-    legal = "ABCDEFGHJKLMNPRSTUVWXYZ0123456789"
-    exact = {c for c in candidates if VIN_PATTERN.fullmatch(c) and vin_is_valid(c)}
-    if len(exact) == 1:
-        return next(iter(exact))
-    if len(exact) > 1:
-        return None
-
-    # Strong consensus case: two or more labeled reads agree on positions 2-17.
-    # Door-label perspective commonly turns the leading '1' into 4/T/7. We may repair
-    # that one glyph only when the remainder is independently stable and checksum confirms it.
-    tails = {}
+    counts = {}
     for c in candidates:
-        if len(c) == 17:
-            tails.setdefault(c[1:], []).append(c)
-    for tail, group in tails.items():
-        if len(group) >= 2:
-            repaired = "1" + tail
-            if VIN_PATTERN.fullmatch(repaired) and vin_is_valid(repaired):
-                return repaired
-
-    # A single high-quality labeled read may have one OCR glyph error. Restrict repairs to
-    # well-observed camera/OCR confusions and require a UNIQUE checksum-valid result.
-    confusion = {
-        "I": "1", "L": "1", "O": "0", "Q": "0", "Z": "2", "S": "5",
-        "G": "6", "B": "8", "T": "7", "4": "1", "7": "1",
-    }
-    repaired = set()
-    for c in candidates:
-        if len(c) != 17:
-            continue
-        for i, ch in enumerate(c):
-            for repl in confusion.get(ch, ""):
-                x = c[:i] + repl + c[i+1:]
-                if VIN_PATTERN.fullmatch(x) and vin_is_valid(x):
-                    repaired.add(x)
-    return next(iter(repaired)) if len(repaired) == 1 else None
-
+        if VIN_PATTERN.fullmatch(c or "") and vin_is_valid(c):
+            counts[c] = counts.get(c, 0) + 1
+    agreed = [vin for vin, count in counts.items() if count >= 2]
+    return agreed[0] if len(agreed) == 1 else None
 
 def extract_vin_from_photo(photo) -> str | None:
-    """Build 23G: barcode first, then fast label-aware deskewed OCR with safe validation."""
+    """Build 23I: barcode first; OCR requires exact agreement across independent reads."""
     image = _photo_to_image(photo)
     if image is None:
         return None
@@ -191,10 +156,92 @@ def extract_vin_from_photo(photo) -> str | None:
             c = _ocr_vin_candidate_from_line(line)
             if c:
                 candidates.append(c)
-        repaired = _safe_repair_labeled_vin(candidates)
-        if repaired:
-            return repaired
-    return _safe_repair_labeled_vin(candidates)
+        agreed = _strict_labeled_vin_consensus(candidates)
+        if agreed:
+            return agreed
+    return _strict_labeled_vin_consensus(candidates)
+
+
+
+VIN_CAMERA_HTML = """
+<div class="vin-camera">
+  <video id="vin-video" autoplay playsinline></video>
+  <canvas id="vin-canvas" hidden></canvas>
+  <div id="vin-status">Opening rear camera…</div>
+  <button id="vin-capture" type="button">Take VIN Photo</button>
+</div>
+"""
+VIN_CAMERA_CSS = """
+.vin-camera { font-family: var(--st-font); width: 100%; }
+#vin-video { width: 100%; border-radius: 10px; background: #111; }
+#vin-capture { width:100%; margin-top:.5rem; padding:.7rem; font-size:1rem; }
+#vin-status { margin-top:.35rem; font-size:.85rem; opacity:.75; }
+"""
+VIN_CAMERA_JS = r"""
+export default function(component) {
+  const { parentElement, setTriggerValue } = component;
+  const video = parentElement.querySelector('#vin-video');
+  const canvas = parentElement.querySelector('#vin-canvas');
+  const button = parentElement.querySelector('#vin-capture');
+  const status = parentElement.querySelector('#vin-status');
+  let stream = null;
+
+  async function openRearCamera() {
+    try {
+      // Require the environment-facing camera. Do not silently fall back to selfie camera.
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { exact: 'environment' },
+          width: { ideal: 1920, min: 1280 },
+          height: { ideal: 1080, min: 720 }
+        }
+      });
+    } catch (e) {
+      try {
+        // Some browsers reject exact facingMode even though they honor an environment preference.
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          }
+        });
+      } catch (e2) {
+        status.textContent = 'Rear camera could not be opened.';
+        button.disabled = true;
+        return;
+      }
+    }
+    video.srcObject = stream;
+    await video.play();
+    const settings = stream.getVideoTracks()[0].getSettings();
+    status.textContent = `Rear camera ready · ${settings.width || video.videoWidth} × ${settings.height || video.videoHeight}`;
+  }
+
+  button.onclick = () => {
+    if (!video.videoWidth || !video.videoHeight) return;
+    // Critical: canvas uses the CAMERA FRAME dimensions, never the displayed widget dimensions.
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+    setTriggerValue('photo', dataUrl);
+  };
+
+  openRearCamera();
+  return () => {
+    if (stream) stream.getTracks().forEach(track => track.stop());
+  };
+}
+"""
+
+def _vin_camera_component():
+    return st.components.v2.component(
+        "tow_match_vin_rear_camera",
+        html=VIN_CAMERA_HTML, css=VIN_CAMERA_CSS, js=VIN_CAMERA_JS,
+    )
 
 
 def init_state():
@@ -302,16 +349,16 @@ def main():
                         st.session_state.vin_scan_message=None
                         st.rerun()
                     st.info('**SCAN VEHICLE LABEL — point the camera at the certification label and take the photo.**')
-                    # Build 23H: use Streamlit's native high-resolution capture.
-                    # The old 2022 rear-camera component rasterized the frame into a
-                    # display-sized canvas before returning it, throwing away VIN detail.
-                    vin_photo=st.camera_input(
-                        'Take VIN Photo',
-                        key='vin_camera',
-                        help='Photograph the vehicle certification label.',
-                        resolution='1080p',
+                    # Build 23I: purpose-built rear-camera component. It requires/prefers
+                    # facingMode=environment and captures at the camera frame's native
+                    # dimensions rather than shrinking to the displayed widget size.
+                    vin_camera = _vin_camera_component()
+                    camera_result = vin_camera(
+                        key='vin_rear_camera',
+                        on_photo_change=lambda: None,
                     )
-                    if vin_photo is not None:
+                    vin_photo = getattr(camera_result, 'photo', None)
+                    if vin_photo:
                         if pytesseract is None:
                             st.error('VIN reader is not installed in this deployment. Reboot the app after deploying requirements.txt and packages.txt.')
                             extracted_vin=None
