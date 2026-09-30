@@ -2,6 +2,7 @@ from __future__ import annotations
 import re
 from io import BytesIO
 import base64
+import numpy as np
 
 import streamlit as st
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
@@ -134,50 +135,99 @@ def _one_glyph_vin_candidates(raw_windows: list[str]) -> set[str]:
     return out
 
 
-def _vpic_confirms_vin(vin: str) -> bool:
-    """Use NHTSA identity data as the guardrail that prevents checksum-valid OCR garbage."""
+def _estimate_label_angle(image: Image.Image) -> int:
+    """Cheaply estimate door-label/barcode tilt before invoking Tesseract.
+
+    Certification labels contain dense horizontal text plus a long 1-D barcode. When that
+    structure is deskewed, horizontal intensity changes from the barcode's vertical bars
+    concentrate into fewer rows. This gives us a fast angle estimate without OCR.
+    """
+    gray = ImageOps.grayscale(image)
+    scale = min(1.0, 760.0 / max(1, gray.width))
+    if scale < 1.0:
+        gray = gray.resize((max(1, int(gray.width * scale)), max(1, int(gray.height * scale))))
+    best_angle, best_score = 0, -1.0
+    for angle in range(-20, 21, 2):
+        work = gray if angle == 0 else gray.rotate(angle, expand=True, fillcolor=255)
+        arr = np.asarray(work, dtype=np.int16)
+        if arr.shape[1] < 20:
+            continue
+        edges = (np.abs(np.diff(arr, axis=1)) > 55).mean(axis=1)
+        if len(edges) >= 12:
+            edges = np.convolve(edges, np.ones(12) / 12.0, mode="same")
+        score = float(np.percentile(edges, 99.5)) if len(edges) else 0.0
+        if score > best_score:
+            best_angle, best_score = angle, score
+    return best_angle
+
+
+def _ocr_vin_windows(image: Image.Image, angle: int, threshold: int | None = None) -> list[str]:
+    work = image if angle == 0 else image.rotate(angle, expand=True, fillcolor="white")
+    # Cap the OCR raster. 23J repeatedly enlarged every full 1080x1920 frame and paid the
+    # Tesseract cost six times. One deskewed 2200px raster retains the label detail we need.
+    scale = min(2.5, 2400.0 / max(1, work.width))
+    if scale > 1.0:
+        work = work.resize((int(work.width * scale), int(work.height * scale)))
+    gray = ImageEnhance.Contrast(ImageOps.grayscale(work)).enhance(2.3).filter(ImageFilter.SHARPEN)
+    if threshold is not None:
+        gray = gray.point(lambda p, t=threshold: 255 if p > t else 0)
     try:
-        d = NHTSAVpicClient(timeout=4).decode(vin)
+        text = pytesseract.image_to_string(
+            gray,
+            config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:",
+        )
+    except Exception:
+        return []
+    windows = []
+    for line in text.splitlines():
+        windows.extend(_ocr_labeled_windows(line))
+    return windows
+
+
+def _exact_valid_reads(windows: list[str]) -> list[str]:
+    from vehicle_data.acquisition import vin_is_valid
+    out = []
+    for v in windows:
+        if VIN_PATTERN.fullmatch(v or "") and vin_is_valid(v) and v not in out:
+            out.append(v)
+    return out
+
+
+def _confirm_single_vin(vin: str) -> bool:
+    """One bounded identity check, never the 23J candidate fan-out."""
+    try:
+        d = NHTSAVpicClient(timeout=3).decode(vin)
     except Exception:
         return False
-    # A real decoded tow vehicle should have these core identity fields. ErrorCode 0 is the
-    # clean vPIC decode. We intentionally do not accept a candidate merely because checksum passes.
-    error = str(d.get("ErrorCode") or "").strip()
-    return error == "0" and bool(d.get("Make")) and bool(d.get("Model")) and bool(d.get("ModelYear"))
+    return (str(d.get("ErrorCode") or "").strip() == "0" and
+            bool(d.get("Make")) and bool(d.get("Model")) and bool(d.get("ModelYear")))
 
 
-def _resolve_labeled_vin(raw_windows: list[str]) -> str | None:
-    """Resolve OCR without guessing: repeated exact read, otherwise unique NHTSA-confirmed candidate."""
-    from vehicle_data.acquisition import vin_is_valid
-    counts = {}
-    for raw in raw_windows:
-        if VIN_PATTERN.fullmatch(raw or "") and vin_is_valid(raw):
-            counts[raw] = counts.get(raw, 0) + 1
-    repeated = [v for v,n in counts.items() if n >= 2]
-    if len(repeated) == 1:
-        return repeated[0]
-    if len(repeated) > 1:
-        return None
-
-    candidates = _one_glyph_vin_candidates(raw_windows)
-    # Keep network work bounded. Prefer candidates actually seen exactly, then those supported
-    # by more than one OCR window at Hamming distance <= 1.
-    def support(v):
-        return sum(1 for r in raw_windows if len(r)==17 and sum(a!=b for a,b in zip(r,v)) <= 1)
-    ordered = sorted(candidates, key=lambda v: (v not in counts, -support(v), v))[:6]
-    confirmed = [v for v in ordered if _vpic_confirms_vin(v)]
-    return confirmed[0] if len(confirmed) == 1 else None
+def _fast_consensus_vin(primary: list[str], corroborating: list[str]) -> str | None:
+    """Accept only a VIN read verbatim by OCR; never synthesize one from substitutions."""
+    valid_primary = _exact_valid_reads(primary)
+    valid_secondary = _exact_valid_reads(corroborating)
+    exact = set(valid_primary) & set(valid_secondary)
+    if len(exact) == 1:
+        return next(iter(exact))
+    supported = set()
+    for v in set(valid_primary + valid_secondary):
+        other = corroborating if v in valid_primary else primary
+        # Corroboration can be imperfect, but the accepted VIN itself was read verbatim and
+        # already passed its checksum. Two-glyph tolerance handles common 1/T and 2/Z pairs.
+        if any(len(r) == 17 and sum(a != b for a, b in zip(v, r)) <= 2 for r in other):
+            supported.add(v)
+    return next(iter(supported)) if len(supported) == 1 else None
 
 
 def extract_vin_from_photo(photo) -> str | None:
-    """Build 23J: rear/high-res capture + barcode + labeled OCR + NHTSA identity guardrail."""
+    """Build 23K: 23J accuracy with bounded OCR and at most one identity lookup per exact read."""
     image = _photo_to_image(photo)
     if image is None:
         return None
 
     vin = extract_vin_from_barcode(image)
     if vin:
-        # Barcode payload is machine-readable, but still require the VIN checksum already enforced above.
         return vin
     if pytesseract is None:
         return None
@@ -186,32 +236,42 @@ def extract_vin_from_photo(photo) -> str | None:
     if Path("/usr/bin/tesseract").exists():
         pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
-    # Keep the work bounded. High-resolution 23I capture supplies the pixels; these passes address
-    # ordinary door-label tilt and contrast without the Build 23E brute-force explosion.
-    attempts = ((0, 2.0, None), (-13, 2.3, None), (13, 2.3, None),
-                (-8, 2.1, 115), (8, 2.1, 115), (0, 2.4, 115))
-    raw_windows = []
-    for angle, contrast, threshold in attempts:
-        work = image if angle == 0 else image.rotate(angle, expand=True, fillcolor="white")
-        scale = min(2.5, 2400 / max(1, work.width))
-        if scale > 1:
-            work = work.resize((int(work.width*scale), int(work.height*scale)))
-        gray = ImageEnhance.Contrast(ImageOps.grayscale(work)).enhance(contrast).filter(ImageFilter.SHARPEN)
-        if threshold is not None:
-            gray = gray.point(lambda p, t=threshold: 255 if p > t else 0)
-        try:
-            text = pytesseract.image_to_string(
-                gray,
-                config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:",
-            )
-        except Exception:
-            continue
-        for line in text.splitlines():
-            raw_windows.extend(_ocr_labeled_windows(line))
-        resolved = _resolve_labeled_vin(raw_windows)
-        if resolved:
-            return resolved
-    return _resolve_labeled_vin(raw_windows)
+    estimated = _estimate_label_angle(image)
+    angles = []
+    for a in (estimated - 1, estimated + 1, estimated, 0):
+        a = max(-22, min(22, int(a)))
+        if a not in angles:
+            angles.append(a)
+
+    # Highest-yield pass first. If it produces one exact checksum-valid VIN, make ONE
+    # short identity check. 23J could make many network calls after every OCR pass.
+    first = _ocr_vin_windows(image, angles[0], None)
+    exact = _exact_valid_reads(first)
+    if len(exact) == 1 and _confirm_single_vin(exact[0]):
+        return exact[0]
+
+    # Independent rendering for local corroboration. No network call is needed if both
+    # OCR paths support the same verbatim checksum-valid VIN.
+    second = _ocr_vin_windows(image, angles[0], 135)
+    resolved = _fast_consensus_vin(first, second)
+    if resolved:
+        return resolved
+
+    # Bounded fallback at the other side of the estimated angle.
+    third = _ocr_vin_windows(image, angles[1], None)
+    resolved = _fast_consensus_vin(first + second, third)
+    if resolved:
+        return resolved
+    exact = _exact_valid_reads(third)
+    if len(exact) == 1 and _confirm_single_vin(exact[0]):
+        return exact[0]
+
+    # Last resort: estimated center angle. Maximum four OCR calls total, no candidate mutation.
+    fourth = _ocr_vin_windows(image, angles[2], None)
+    resolved = _fast_consensus_vin(first + second + third, fourth)
+    if resolved:
+        return resolved
+    return None
 
 
 VIN_CAMERA_HTML = """
