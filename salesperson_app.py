@@ -97,35 +97,87 @@ def extract_vin_from_barcode(image: Image.Image) -> str | None:
     return next(iter(seen)) if len(seen) == 1 else None
 
 
-def _ocr_vin_candidate_from_line(line: str) -> str | None:
-    """Extract a VIN-shaped string only from a line Tesseract itself identified as VIN."""
+def _ocr_labeled_windows(line: str) -> list[str]:
+    """Return 17-character OCR windows only from text immediately following a printed VIN label."""
     u = (line or "").upper()
     m = re.search(r"V[I1L]N\s*[:;]?\s*(.*)", u)
     if not m:
-        return None
+        return []
     raw = re.sub(r"[^A-Z0-9]", "", m.group(1))
-    # The VIN is the first VIN-like payload after the printed VIN label.
-    return raw[:17] if len(raw) >= 17 else None
+    # VIN is printed immediately after VIN:. Keep the search local so unrelated label text
+    # cannot become a candidate, while allowing one leading/trailing OCR artifact.
+    raw = raw[:22]
+    return [raw[i:i+17] for i in range(max(0, min(5, len(raw)-16))) if len(raw[i:i+17]) == 17]
 
 
-def _strict_labeled_vin_consensus(candidates: list[str]) -> str | None:
-    """Accept OCR only when independent reads agree exactly on one valid VIN. Never repair glyphs."""
+def _one_glyph_vin_candidates(raw_windows: list[str]) -> set[str]:
+    """Generate only one-glyph OCR alternatives actually justified by common camera confusions."""
+    from vehicle_data.acquisition import vin_is_valid
+    # These are OCR alternatives, not arbitrary VIN substitutions. 1/4/7/T is especially
+    # common on the narrow leading '1' printed on certification labels.
+    alternatives = {
+        "I":"1", "L":"1", "4":"1", "7":"1", "T":"1",
+        "O":"0", "Q":"0", "Z":"2", "S":"5", "G":"6", "B":"8",
+        "1":"4T7", "0":"OQ", "2":"Z", "5":"S", "6":"G", "8":"B",
+    }
+    out = set()
+    for raw in raw_windows:
+        if VIN_PATTERN.fullmatch(raw) and vin_is_valid(raw):
+            out.add(raw)
+        if len(raw) != 17:
+            continue
+        for i, ch in enumerate(raw):
+            for repl in alternatives.get(ch, ""):
+                candidate = raw[:i] + repl + raw[i+1:]
+                if VIN_PATTERN.fullmatch(candidate) and vin_is_valid(candidate):
+                    out.add(candidate)
+    return out
+
+
+def _vpic_confirms_vin(vin: str) -> bool:
+    """Use NHTSA identity data as the guardrail that prevents checksum-valid OCR garbage."""
+    try:
+        d = NHTSAVpicClient(timeout=4).decode(vin)
+    except Exception:
+        return False
+    # A real decoded tow vehicle should have these core identity fields. ErrorCode 0 is the
+    # clean vPIC decode. We intentionally do not accept a candidate merely because checksum passes.
+    error = str(d.get("ErrorCode") or "").strip()
+    return error == "0" and bool(d.get("Make")) and bool(d.get("Model")) and bool(d.get("ModelYear"))
+
+
+def _resolve_labeled_vin(raw_windows: list[str]) -> str | None:
+    """Resolve OCR without guessing: repeated exact read, otherwise unique NHTSA-confirmed candidate."""
     from vehicle_data.acquisition import vin_is_valid
     counts = {}
-    for c in candidates:
-        if VIN_PATTERN.fullmatch(c or "") and vin_is_valid(c):
-            counts[c] = counts.get(c, 0) + 1
-    agreed = [vin for vin, count in counts.items() if count >= 2]
-    return agreed[0] if len(agreed) == 1 else None
+    for raw in raw_windows:
+        if VIN_PATTERN.fullmatch(raw or "") and vin_is_valid(raw):
+            counts[raw] = counts.get(raw, 0) + 1
+    repeated = [v for v,n in counts.items() if n >= 2]
+    if len(repeated) == 1:
+        return repeated[0]
+    if len(repeated) > 1:
+        return None
+
+    candidates = _one_glyph_vin_candidates(raw_windows)
+    # Keep network work bounded. Prefer candidates actually seen exactly, then those supported
+    # by more than one OCR window at Hamming distance <= 1.
+    def support(v):
+        return sum(1 for r in raw_windows if len(r)==17 and sum(a!=b for a,b in zip(r,v)) <= 1)
+    ordered = sorted(candidates, key=lambda v: (v not in counts, -support(v), v))[:6]
+    confirmed = [v for v in ordered if _vpic_confirms_vin(v)]
+    return confirmed[0] if len(confirmed) == 1 else None
+
 
 def extract_vin_from_photo(photo) -> str | None:
-    """Build 23I: barcode first; OCR requires exact agreement across independent reads."""
+    """Build 23J: rear/high-res capture + barcode + labeled OCR + NHTSA identity guardrail."""
     image = _photo_to_image(photo)
     if image is None:
         return None
 
     vin = extract_vin_from_barcode(image)
     if vin:
+        # Barcode payload is machine-readable, but still require the VIN checksum already enforced above.
         return vin
     if pytesseract is None:
         return None
@@ -134,17 +186,19 @@ def extract_vin_from_photo(photo) -> str | None:
     if Path("/usr/bin/tesseract").exists():
         pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
-    # Real certification labels are commonly photographed at an angle. Rather than the
-    # Build 23E brute-force crop/threshold grid, use a small bounded set of deskew attempts.
-    # Stop immediately on a checksum-valid labeled VIN.
-    attempts = ((-13, 2.3), (0, 2.0), (13, 2.3), (-8, 2.1), (8, 2.1))
-    candidates = []
-    for angle, contrast in attempts:
+    # Keep the work bounded. High-resolution 23I capture supplies the pixels; these passes address
+    # ordinary door-label tilt and contrast without the Build 23E brute-force explosion.
+    attempts = ((0, 2.0, None), (-13, 2.3, None), (13, 2.3, None),
+                (-8, 2.1, 115), (8, 2.1, 115), (0, 2.4, 115))
+    raw_windows = []
+    for angle, contrast, threshold in attempts:
         work = image if angle == 0 else image.rotate(angle, expand=True, fillcolor="white")
-        scale = min(3.0, 2200 / max(1, work.width))
+        scale = min(2.5, 2400 / max(1, work.width))
         if scale > 1:
             work = work.resize((int(work.width*scale), int(work.height*scale)))
         gray = ImageEnhance.Contrast(ImageOps.grayscale(work)).enhance(contrast).filter(ImageFilter.SHARPEN)
+        if threshold is not None:
+            gray = gray.point(lambda p, t=threshold: 255 if p > t else 0)
         try:
             text = pytesseract.image_to_string(
                 gray,
@@ -153,14 +207,11 @@ def extract_vin_from_photo(photo) -> str | None:
         except Exception:
             continue
         for line in text.splitlines():
-            c = _ocr_vin_candidate_from_line(line)
-            if c:
-                candidates.append(c)
-        agreed = _strict_labeled_vin_consensus(candidates)
-        if agreed:
-            return agreed
-    return _strict_labeled_vin_consensus(candidates)
-
+            raw_windows.extend(_ocr_labeled_windows(line))
+        resolved = _resolve_labeled_vin(raw_windows)
+        if resolved:
+            return resolved
+    return _resolve_labeled_vin(raw_windows)
 
 
 VIN_CAMERA_HTML = """
@@ -185,6 +236,36 @@ export default function(component) {
   const button = parentElement.querySelector('#vin-capture');
   const status = parentElement.querySelector('#vin-status');
   let stream = null;
+  let barcodeTimer = null;
+  let barcodeBusy = false;
+  let barcodeDone = false;
+
+  async function startBarcodeWatch() {
+    if (!("BarcodeDetector" in globalThis)) return;
+    try {
+      const formats = await BarcodeDetector.getSupportedFormats();
+      if (!formats.includes('code_39')) return;
+      const detector = new BarcodeDetector({formats:['code_39']});
+      barcodeTimer = setInterval(async () => {
+        if (barcodeBusy || barcodeDone || video.readyState < 2) return;
+        barcodeBusy = true;
+        try {
+          const hits = await detector.detect(video);
+          for (const hit of hits) {
+            const raw = (hit.rawValue || '').trim();
+            if (raw) {
+              barcodeDone = true;
+              status.textContent = 'VIN barcode found';
+              setTriggerValue('barcode', raw);
+              clearInterval(barcodeTimer);
+              break;
+            }
+          }
+        } catch (e) { /* photo/OCR fallback remains available */ }
+        finally { barcodeBusy = false; }
+      }, 350);
+    } catch (e) { /* unsupported format: photo/OCR fallback */ }
+  }
 
   async function openRearCamera() {
     try {
@@ -218,6 +299,7 @@ export default function(component) {
     await video.play();
     const settings = stream.getVideoTracks()[0].getSettings();
     status.textContent = `Rear camera ready · ${settings.width || video.videoWidth} × ${settings.height || video.videoHeight}`;
+    startBarcodeWatch();
   }
 
   button.onclick = () => {
@@ -232,6 +314,7 @@ export default function(component) {
 
   openRearCamera();
   return () => {
+    if (barcodeTimer) clearInterval(barcodeTimer);
     if (stream) stream.getTracks().forEach(track => track.stop());
   };
 }
@@ -357,6 +440,14 @@ def main():
                         key='vin_rear_camera',
                         on_photo_change=lambda: None,
                     )
+                    barcode_raw = getattr(camera_result, 'barcode', None)
+                    if barcode_raw:
+                        barcode_vin = _valid_vin_from_barcode_text(barcode_raw)
+                        if barcode_vin:
+                            st.session_state.apply_scanned_vin=barcode_vin
+                            st.session_state.vin_camera_open=False
+                            st.session_state.vin_scan_message=f'VIN read: {barcode_vin}'
+                            st.rerun()
                     vin_photo = getattr(camera_result, 'photo', None)
                     if vin_photo:
                         if pytesseract is None:
