@@ -425,7 +425,7 @@ def init_state():
         'adults':2,'children':0,'pets':0.0,'cargo':150.0,'category':'Travel Trailer',
         'acquisition':None,'verify_target':None,'matched_category':None,
         'edit_people_open':False,'edit_vehicle_open':False,
-        'edit_payload':None,'edit_tow_rating':None,'edit_fw_rating':None,
+        'edit_payload':None,'edit_tow_rating':None,'edit_fw_rating':None,'edit_vin':'',
         'vin_camera_open':False,'vin_scan_message':None,
     }
     for cat in CATEGORIES:
@@ -616,7 +616,7 @@ def main():
                     st.session_state.matched_category=st.session_state.category; st.session_state.verify_target=None
                     st.rerun()
         else:
-            st.caption('Vehicle identity is locked for this Tow Match. Use **New Tow Match** for a different vehicle.')
+            st.caption('Vehicle details can be updated below. Once a VIN is established, use **New Tow Match** to change vehicles.')
             st.write(f"VIN: **{st.session_state.vin or 'Not entered'}**")
 
     if not st.session_state.vehicle_ready:
@@ -651,6 +651,7 @@ def main():
             if opening:
                 # Always seed the correction form from the CURRENT effective vehicle facts.
                 # Streamlit otherwise preserves stale widget state from an earlier opening.
+                st.session_state.edit_vin=st.session_state.vin or ''
                 st.session_state.edit_payload=int(round(vehicle.payload_lb)) if vehicle.payload_lb is not None else None
                 st.session_state.edit_tow_rating=int(round(vehicle.tow_rating_lb)) if vehicle.tow_rating_lb is not None else None
                 st.session_state.edit_fw_rating=int(round(vehicle.fifth_wheel_tow_rating_lb)) if vehicle.fifth_wheel_tow_rating_lb is not None else None
@@ -673,19 +674,41 @@ def main():
     if st.session_state.edit_vehicle_open:
         with st.container(border=True):
             st.markdown('**Correct Vehicle Data**')
-            st.caption(f"VIN / vehicle identity locked: {st.session_state.vin or identity_text}")
+            # Payload-only acquisition is NOT an established vehicle identity.
+            # A VIN can be supplied later without discarding the customer's inputs.
+            identity_established=bool(st.session_state.vin and acq.identity.vin)
+            if identity_established:
+                st.caption(f"VIN / vehicle identity locked: {st.session_state.vin}. Use New Tow Match for another vehicle.")
+            else:
+                st.info('No VIN established yet. You can add the VIN now and keep the payload and other inputs already entered.')
             st.caption('Current effective values are shown below. Leave an unknown rating blank.')
             with st.form('correct_vehicle_data'):
+                if not identity_established:
+                    added_vin=st.text_input('Add VIN (optional)',key='edit_vin',placeholder='17-character VIN')
+                else:
+                    added_vin=st.session_state.vin
                 vc1,vc2,vc3=st.columns(3)
                 with vc1: payload=st.number_input('Yellow-label payload (lb)',min_value=0,step=1,placeholder='Unknown',key='edit_payload')
                 with vc2: tow=st.number_input('Conventional tow rating (lb)',min_value=0,step=100,placeholder='Unknown',key='edit_tow_rating')
                 with vc3: fw=st.number_input('Fifth-wheel rating (lb)',min_value=0,step=100,placeholder='Unknown',key='edit_fw_rating')
                 if st.form_submit_button('Correct & Recalculate',type='primary'):
-                    st.session_state.payload=payload
-                    st.session_state.tow_rating=tow
-                    st.session_state.fw_rating=fw
-                    st.session_state.edit_vehicle_open=False
-                    st.rerun()
+                    from vehicle_data.acquisition import normalize_vin, vin_is_valid
+                    normalized=normalize_vin(added_vin) if added_vin else ''
+                    if normalized and not vin_is_valid(normalized):
+                        st.error('VIN is not valid. Correct it or leave it blank to continue with payload-only results.')
+                    else:
+                        adding_identity=bool(normalized and not identity_established)
+                        st.session_state.payload=payload
+                        st.session_state.tow_rating=tow
+                        st.session_state.fw_rating=fw
+                        if adding_identity:
+                            st.session_state.vin=normalized
+                            # Refresh identity/facts with the newly supplied VIN.
+                            # The old payload-only acquisition must not overwrite them.
+                            _,updated,_=acquire_for_category(category,live_lookup=True)
+                            st.session_state.acquisition=updated
+                        st.session_state.edit_vehicle_open=False
+                        st.rerun()
     for warning in (prior.warnings if prior else []): st.caption('Vehicle note: '+warning)
     preliminary_needs=[]
     if vehicle.payload_lb is None: preliminary_needs.append('yellow-label payload')
