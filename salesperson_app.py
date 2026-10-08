@@ -56,10 +56,8 @@ def _valid_vin_from_barcode_text(raw: str) -> str | None:
         candidates.append(text[1:])
     if len(text) == 17:
         candidates.append(text)
-    # Some readers return framing/data characters around the payload. Never guess: only
-    # accept a unique checksum-valid 17-character window.
-    for i in range(max(0, len(text) - 16)):
-        candidates.append(text[i:i+17])
+    # Do not slide through arbitrary barcode data looking for a checksum-valid
+    # window: only the exact VIN or J1877's leading I identifier is supported.
     valid = []
     for c in candidates:
         if VIN_PATTERN.fullmatch(c) and vin_is_valid(c) and c not in valid:
@@ -99,16 +97,27 @@ def extract_vin_from_barcode(image: Image.Image) -> str | None:
 
 
 def _ocr_labeled_windows(line: str) -> list[str]:
-    """Return 17-character OCR windows only from text immediately following a printed VIN label."""
+    """Only the VIN field's first 17 glyphs; never slide into adjacent label fields.
+
+    The old sliding-window approach accepted e.g. U2AT7KEA31907TYPE when
+    the start of the VIN was lost and the neighboring TYPE field was appended.
+    """
     u = (line or "").upper()
-    m = re.search(r"V[I1L]N\s*[:;]?\s*(.*)", u)
+    m = re.search(r"(?<![A-Z0-9])V[I1L]N\s*[:;]?\s*(.*)", u)
     if not m:
         return []
-    raw = re.sub(r"[^A-Z0-9]", "", m.group(1))
-    # VIN is printed immediately after VIN:. Keep the search local so unrelated label text
-    # cannot become a candidate, while allowing one leading/trailing OCR artifact.
-    raw = raw[:22]
-    return [raw[i:i+17] for i in range(max(0, min(5, len(raw)-16))) if len(raw[i:i+17]) == 17]
+    # The VIN is immediately after its printed label. If its beginning is
+    # missing, fail; do not borrow characters from TYPE, GVWR, etc.
+    tail = m.group(1)
+    tail = re.split(r"\b(?:TYPE|GVWR|GAWR|DATE|TIRES|RIMS|AXLE|VIN)\b", tail, maxsplit=1)[0]
+    raw = re.sub(r"[^A-Z0-9]", "", tail)
+    if len(raw) < 17:
+        return []
+    candidate = raw[:17]
+    # Even if the field name is stuck to the OCR token, do not accept it.
+    if any(field in candidate for field in ("TYPE", "GVWR", "GAWR", "DATE", "TIRES", "RIMS", "AXLE")):
+        return []
+    return [candidate]
 
 
 def _one_glyph_vin_candidates(raw_windows: list[str]) -> set[str]:
@@ -189,7 +198,7 @@ def _exact_valid_reads(windows: list[str]) -> list[str]:
     from vehicle_data.acquisition import vin_is_valid
     out = []
     for v in windows:
-        if VIN_PATTERN.fullmatch(v or "") and vin_is_valid(v) and v not in out:
+        if VIN_PATTERN.fullmatch(v or "") and not any(t in v for t in ("TYPE", "GVWR", "GAWR", "DATE", "TIRES", "RIMS", "AXLE")) and vin_is_valid(v) and v not in out:
             out.append(v)
     return out
 
@@ -549,7 +558,7 @@ def main():
                             received = _photo_to_image(vin_photo)
                             if received is not None:
                                 st.caption(f"Camera image received: {received.width} × {received.height} pixels")
-                            st.warning("VIN wasn't recognized. Retake the photo or enter the VIN manually.")
+                            st.warning("VIN wasn't recognized. You can retake the photo, enter the VIN, or continue using the yellow-label payload.")
                             r1,r2=st.columns(2)
                             with r1:
                                 if st.button('↻ Retake Photo',key='retake_vin_photo',use_container_width=True):
@@ -560,9 +569,28 @@ def main():
                                     st.session_state.vin_camera_open=False
                                     st.session_state.vin_scan_message=None
                                     st.rerun()
+                            st.caption('Or continue without another scan:')
+                            manual_vin, manual_payload = st.columns(2)
+                            with manual_vin:
+                                if st.button('Enter VIN Manually', key='scan_manual_vin', use_container_width=True):
+                                    st.session_state.vin_camera_open=False
+                                    st.session_state.vin_scan_message=None
+                                    st.session_state.scan_manual_hint='vin'
+                                    st.rerun()
+                            with manual_payload:
+                                if st.button('Enter Payload Manually', key='scan_manual_payload', use_container_width=True):
+                                    st.session_state.vin_camera_open=False
+                                    st.session_state.vin_scan_message=None
+                                    st.session_state.scan_manual_hint='payload'
+                                    st.rerun()
                 if st.session_state.get('vin_scan_message'):
                     st.success(st.session_state.vin_scan_message)
                     st.session_state.vin_scan_message=None
+                hint=st.session_state.pop('scan_manual_hint',None)
+                if hint=='vin':
+                    st.info('Enter the VIN in the VIN field above. Scanning is optional.')
+                elif hint=='payload':
+                    st.info('Enter the yellow-label payload below. You can continue without a VIN; unverified vehicle ratings remain Verify.')
                 st.caption('Enter the payload from the yellow door label.')
                 st.number_input('Yellow-label payload (lb)',min_value=0,step=1,value=None,key='payload',placeholder='Payload shown on door label')
             with c2:
