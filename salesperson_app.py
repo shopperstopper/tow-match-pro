@@ -161,7 +161,7 @@ def _estimate_label_angle(image: Image.Image) -> int:
     return best_angle
 
 
-def _ocr_vin_windows(image: Image.Image, angle: int, threshold: int | None = None) -> list[str]:
+def _ocr_vin_windows(image: Image.Image, angle: int, threshold: int | None = None, *, psm: int = 6) -> list[str]:
     work = image if angle == 0 else image.rotate(angle, expand=True, fillcolor="white")
     # Cap the OCR raster. 23J repeatedly enlarged every full 1080x1920 frame and paid the
     # Tesseract cost six times. One deskewed 2200px raster retains the label detail we need.
@@ -174,7 +174,8 @@ def _ocr_vin_windows(image: Image.Image, angle: int, threshold: int | None = Non
     try:
         text = pytesseract.image_to_string(
             gray,
-            config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:",
+            config=f"--psm {psm} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:",
+            timeout=4,
         )
     except Exception:
         return []
@@ -266,11 +267,32 @@ def extract_vin_from_photo(photo) -> str | None:
     if len(exact) == 1 and _confirm_single_vin(exact[0]):
         return exact[0]
 
-    # Last resort: estimated center angle. Maximum four OCR calls total, no candidate mutation.
-    fourth = _ocr_vin_windows(image, angles[2], None)
-    resolved = _fast_consensus_vin(first + second + third, fourth)
-    if resolved:
-        return resolved
+    # Build 23L: progressively recover using the orientations that 23J used successfully.
+    # Do not run NHTSA lookups for speculative OCR mutations; only corroborate exact reads.
+    # Keep the known-good camera and matching logic completely unchanged.
+    observed = first + second + third
+    for angle, threshold, psm in (
+        (angles[2], None, 6),
+        (0, None, 6),
+        (-13, None, 6),
+        (13, None, 6),
+        (-8, 115, 6),
+        (8, 115, 6),
+        (0, 115, 6),
+        (estimated, None, 11),
+    ):
+        # Do not duplicate work already performed by the fast stage.
+        if (angle, threshold, psm) in ((angles[0], None, 6),
+                                        (angles[0], 135, 6),
+                                        (angles[1], None, 6)):
+            continue
+        more = _ocr_vin_windows(image, angle, threshold, psm=psm)
+        if not more:
+            continue
+        resolved = _fast_consensus_vin(observed, more)
+        if resolved:
+            return resolved
+        observed.extend(more)
     return None
 
 
